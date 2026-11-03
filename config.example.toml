@@ -1,0 +1,30 @@
+# Copy this file to local/config.toml, edit the values, and set mode 0600.
+# Running `python3 echo_plus2.py configure` enables the early WiFi gate.
+# The file stays on your computer and is ignored by Git. Kiosk's setup page
+# handles its Home Assistant account and voice settings after this step.
+
+[wifi]
+# The Echo starts each boot with WiFi off. After root, the gate installs its
+# network filters and connects to this network.
+ssid = ""
+password = ""
+
+# Download Kiosk Satellite separately. Set install = false if you only want
+# root and the WiFi gate. The gate permits its installed Android UID to make
+# outbound connections when Kiosk is selected.
+[kiosk]
+install = true
+# Full path to the APK you downloaded, for example from your Downloads folder.
+# Ignored when install = false.
+apk = "/absolute/path/to/kiosk-satellite.apk"
+
+# Authenticated stock ADB over WiFi opens a normal UID-2000 shell.
+[adb]
+network = true
+
+# For a local voice assistant, remove Alexa Speech for user 0, disable the OTA
+# and Alexa setup apps for user 0, and stop three Amazon services after root
+# on each boot. The signed system files remain. A factory reset is the
+# supported way back to stock Alexa in this guide.
+[amazon]
+lockdown = true

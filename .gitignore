@@ -1,0 +1,40 @@
+# Generated payloads and Android builds
+src/bootstrap/build/
+src/bootstrap/stock-transition/build/
+src/persistence/*/build/
+*.apk
+*.bin
+*.elf
+*.img
+*.raw
+*.dump
+
+# Private captures, signing material, and local configuration
+/local
+/config*.toml
+!/config.example.toml
+/integrations/voice-led/dist/
+/integrations/buttons/dist/
+/integrations/asr-mic/dist/
+*.jks
+*.keystore
+*.key
+*.pem
+*.env
+.env*
+echo-plus2-private/
+private/
+captures/
+stock-init/
+capture-report.json
+gpt-partitions.json
+config.toml
+adbkey
+adbkey.pub
+
+# Local tooling
+__pycache__/
+*.pyc
+*.log
+.DS_Store
+.venv/

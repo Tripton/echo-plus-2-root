@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "apiVersion": 1,
+  "id": "echo-plus2-voice-led",
+  "name": "Echo Plus 2 Voice LED",
+  "version": "0.1.7",
+  "minAndroidSdk": 24,
+  "minAppVersion": "2026.10.41",
+  "entryClass": "org.local.echoled.EchoVoiceLedPlugin",
+  "description": "Maps voice, mute and volume changes to stock LED patterns; native ASP beam events enable the direction-rotated listening pattern.",
+  "author": "Echo Plus 2 research",
+  "license": "Apache-2.0",
+  "capabilities": ["host.read", "entities"],
+  "settings": [],
+  "commands": []
+}

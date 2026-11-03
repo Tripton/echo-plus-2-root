@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "apiVersion": 1,
+  "id": "echo-plus2-buttons",
+  "name": "Echo Plus 2 Buttons",
+  "version": "0.1.2",
+  "minAndroidSdk": 24,
+  "minAppVersion": "2026.10.45",
+  "entryClass": "org.local.echobuttons.EchoButtonsPlugin",
+  "description": "Relays only the Plus 2 Action and microphone buttons to Kiosk Satellite's existing button handler.",
+  "author": "Echo Plus 2 research",
+  "license": "Apache-2.0",
+  "headless": true,
+  "capabilities": ["host.control"],
+  "settings": [],
+  "commands": []
+}

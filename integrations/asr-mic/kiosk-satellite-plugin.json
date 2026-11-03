@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "apiVersion": 1,
+  "id": "echo-plus2-asr-mic",
+  "name": "Echo Plus 2 Amazon ASR microphone",
+  "version": "0.1.1",
+  "minAndroidSdk": 24,
+  "minAppVersion": "2026.10.41",
+  "entryClass": "org.local.echoasrmic.EchoAsrMicPlugin",
+  "description": "Use the existing Kiosk recorder through the Echo Plus 2's Amazon ASR pipeline after checking its recorder layout and capture source.",
+  "author": "Echo Plus 2 research",
+  "license": "Apache-2.0",
+  "headless": true,
+  "capabilities": ["host.read", "host.control"],
+  "settings": [],
+  "commands": [
+    {"id": "inspect", "title": "Inspect microphone and app identity"},
+    {"id": "deactivate", "title": "Restore microphone before disabling plugin"}
+  ]
+}

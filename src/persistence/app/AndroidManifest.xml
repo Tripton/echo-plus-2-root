@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.local.lidar.binderprobe"
+    android:versionCode="1"
+    android:versionName="1.0.0">
+    <uses-sdk android:minSdkVersion="23" android:targetSdkVersion="23" />
+    <uses-feature android:name="android.hardware.touchscreen"
+        android:required="false" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+
+    <application android:label="Echo Plus 2 persistence PoC"
+        android:allowBackup="false">
+        <service android:name=".ProbeService" android:exported="false"
+            android:directBootAware="true" />
+        <service android:name=".BlockingService" android:exported="false"
+            android:process=":blocked" android:directBootAware="true" />
+        <receiver android:name=".ProbeReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+        <receiver android:name=".EarlyRootReceiver" android:exported="true"
+            android:directBootAware="true">
+            <intent-filter>
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>
