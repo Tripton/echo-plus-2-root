@@ -16,6 +16,7 @@ src/persistence/*/build/
 /integrations/voice-led/dist/
 /integrations/buttons/dist/
 /integrations/asr-mic/dist/
+/integrations/temperature/dist/
 *.jks
 *.keystore
 *.key

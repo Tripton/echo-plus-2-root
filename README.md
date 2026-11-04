@@ -150,7 +150,7 @@ This checks the USB identity, grants Kiosk's microphone permission, starts the i
 
 When `kiosk.install = true`, `configure` also installs two fixed-purpose workers. One restores the installed Kiosk package's microphone permission if Android revokes it. The other reads Action and Mute from the Plus 2's input devices and sends those events only to a local Kiosk plugin. The workers are checked against hashes embedded in the root helper and start after root on each boot. Kiosk itself is not pinned to an APK version or archive hash.
 
-Build and install the [ASR microphone plugin](integrations/asr-mic/README.md) first if you want the native beam direction. It selects the stock source-6 audio path for Kiosk's recorder and verifies that source after reopening the microphone. Then install the [Voice LED plugin](integrations/voice-led/README.md) for listening, mute, volume and beam-direction light patterns, and the [Buttons plugin](integrations/buttons/README.md) for Action and Mute. Install each ZIP in Kiosk's **Settings → Plugin Manager → Developer Tools → Install from ZIP** and enable it there. The installer places the device-side button worker, but the buttons only affect Kiosk after you enable the plugin.
+Build and install the [ASR microphone plugin](integrations/asr-mic/README.md) first if you want the native beam direction. It selects the stock source-6 audio path for Kiosk's recorder and verifies that source after reopening the microphone. Then install the [Voice LED plugin](integrations/voice-led/README.md) for listening, mute, volume and beam-direction light patterns, and the [Buttons plugin](integrations/buttons/README.md) for Action and Mute. The optional [Temperature plugin](integrations/temperature/README.md) publishes the stock ambient-temperature estimate to Kiosk and Home Assistant. Install each ZIP in Kiosk's **Settings → Plugin Manager → Developer Tools → Install from ZIP** and enable it there. The installer places the device-side button worker, but the buttons only affect Kiosk after you enable the plugin.
 
 ## Project layout
 
@@ -161,6 +161,8 @@ Build and install the [ASR microphone plugin](integrations/asr-mic/README.md) fi
 | `src/bootstrap/` | Firmware capture and temporary RAM root |
 | `src/bootstrap/stock-transition/` | Return to signed Android and app installation |
 | `src/persistence/` | Binder exploit app and root helper |
-| `integrations/asr-mic/`, `integrations/voice-led/`, `integrations/buttons/` | Optional Kiosk Satellite plugins |
+| `integrations/` | Optional Kiosk Satellite plugins for microphone, LEDs, buttons and temperature |
 
 MTKClient credits xyzz for Kamakiri. Maddie Stone and Jann Horn analyzed the Binder bug in [Google Project Zero's write-up](https://projectzero.google/2019/11/bad-binder-android-in-wild-exploit.html). Project-authored source is licensed under [Apache-2.0](LICENSE).
+
+See the [changelog](CHANGELOG.md) for tested integration updates.

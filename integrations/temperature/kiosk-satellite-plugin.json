@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "apiVersion": 1,
+  "id": "echo-plus2-temperature",
+  "name": "Echo Plus 2 Temperature",
+  "version": "0.1.0",
+  "minAndroidSdk": 24,
+  "minAppVersion": "2026.10.41",
+  "entryClass": "org.local.echotemp.EchoTemperaturePlugin",
+  "description": "Publishes the Echo Plus 2's estimated room temperature as a local and Home Assistant sensor.",
+  "author": "Echo Plus 2 research",
+  "license": "Apache-2.0",
+  "capabilities": ["entities"],
+  "settings": [],
+  "commands": []
+}
