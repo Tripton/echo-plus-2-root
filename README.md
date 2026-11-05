@@ -130,7 +130,9 @@ python3 echo_plus2.py configure --config local/config.toml
 ```
 
 This command first reboots normally to renew the short-lived local root session, then stages the WiFi profile while the Echo is offline. It applies your Kiosk and Amazon choices, checks that the boot budget, WiFi preference, and package changes are saved, and reboots again to verify the result.
-When Kiosk is selected, the command starts it once and prints `KIOSK_SETUP_READY` with a local browser address forwarded through USB. Keep USB connected while completing setup. When WiFi ADB is enabled, the command prints the exact reconnect and shell commands for this Echo's IP address. To inspect the current boot again, run `python3 echo_plus2.py gate-status` (add `--config` if needed). Kiosk's Home Assistant account and voice settings are entered in its own setup page.
+When Kiosk is selected, the command starts it once and prints `KIOSK_SETUP_READY` with a browser address forwarded through USB. Keep USB connected for this initial setup. After a successful gated boot, open `http://<Echo-WiFi-IP>:2324/` from the same private WiFi subnet. Set a Kiosk admin password before using the page over WiFi.
+
+When WiFi ADB is enabled, the command prints the reconnect and shell commands for this Echo's IP address. To inspect the current boot again, run `python3 echo_plus2.py gate-status` (add `--config` if needed). Enter Kiosk's Home Assistant account and voice settings on its setup page.
 
 The setup command expects a clean, unconfigured WiFi profile and no earlier gate policy. If it stops after a partial step, keep USB connected and inspect the saved `local/device/` backup before retrying. Do not rerun `configure` blindly.
 
@@ -151,6 +153,21 @@ This checks the USB identity, grants Kiosk's microphone permission, starts the i
 When `kiosk.install = true`, `configure` also installs two fixed-purpose workers. One restores the installed Kiosk package's microphone permission if Android revokes it. The other reads Action and Mute from the Plus 2's input devices and sends those events only to a local Kiosk plugin. The workers are checked against hashes embedded in the root helper and start after root on each boot. Kiosk itself is not pinned to an APK version or archive hash.
 
 Build and install the [ASR microphone plugin](integrations/asr-mic/README.md) first if you want the native beam direction. It selects the stock source-6 audio path for Kiosk's recorder and verifies that source after reopening the microphone. Then install the [Voice LED plugin](integrations/voice-led/README.md) for listening, mute, volume and beam-direction light patterns, and the [Buttons plugin](integrations/buttons/README.md) for Action and Mute. The optional [Temperature plugin](integrations/temperature/README.md) publishes the stock ambient-temperature estimate to Kiosk and Home Assistant. Install each ZIP in Kiosk's **Settings → Plugin Manager → Developer Tools → Install from ZIP** and enable it there. The installer places the device-side button worker, but the buttons only affect Kiosk after you enable the plugin.
+
+Kiosk may still warn that its **Hardware buttons** accessibility service is missing. The Echo Buttons plugin uses the separate root button bridge instead. If Action and Mute work through that plugin, leave the accessibility service off to avoid duplicate key events. The installer grants Kiosk's microphone permission. For other optional features, check Kiosk's **Device → Permissions Manager** and grant only the permissions those features need.
+
+### Optional: update Kiosk Satellite without a screen
+
+This is only needed if you want to update Kiosk Satellite from its web interface. It is not part of the root or voice setup. On the Plus 2's Android 7.1.2, Kiosk normally needs an on-device confirmation to install an update. Its [optional update helper](https://github.com/jxlarrea/kiosk-satellite/blob/main/docs/updates.md#optional-update-helper) removes that prompt. With authenticated WiFi ADB connected, replace `192.168.1.42` below with the Echo's current IP address:
+
+```sh
+adb connect 192.168.1.42:5555
+adb -s 192.168.1.42:5555 shell 'content read --uri content://me.jxl.kiosk_satellite.update-helper/start | sh'
+```
+
+Wait for `Kiosk Satellite update helper started`, then check **Device → Optional update helper** in Kiosk's web interface. It should report **Ready**. Use Kiosk's own **Install** button for the available release. Kiosk downloads the APK and performs the update. On the tested Plus 2, this updated Kiosk Satellite from 2026.11.5 to 2026.11.7 without a physical confirmation. The existing Home Assistant connection and Echo plugins were still present afterward, and the voice assistant answered again.
+
+The helper survives a Kiosk app restart and self-update, but stops when the Echo reboots. Run the second command again before the next app update after a device reboot.
 
 ## Project layout
 

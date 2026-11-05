@@ -7,6 +7,7 @@ credential, device serial, or authorized key is printed or committed.
 
 from dataclasses import dataclass
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -615,6 +616,17 @@ def verify_gate(network: bool, install_kiosk: bool) -> None:
             f"kiosk_uid={kiosk_uid}\n" not in report or
             "GATE_HOOKS_OK" not in report):
         raise RuntimeError("Current-boot WiFi gate markers or hooks differ")
+    if install_kiosk:
+        assigned = re.search(r"\binet\s+(\d+\.\d+\.\d+\.\d+/\d+)", address)
+        if not assigned:
+            raise RuntimeError("Kiosk web subnet could not be identified")
+        interface = ipaddress.ip_interface(assigned.group(1))
+        subnet = interface.network
+        if not subnet.is_private:
+            raise RuntimeError("Kiosk web access requires a private WiFi subnet")
+        root_read("/system/bin/iptables -C INPUT -i wlan0 "
+                  f"-s {subnet} -p tcp --dport 2324 -j ACCEPT")
+        print(f"KIOSK_WEB_LAN_READY: http://{interface.ip}:2324/", flush=True)
     if network:
         if adb_read("shell", "getprop", "ro.adb.secure") != "1":
             raise RuntimeError("WiFi ADB is not in authenticated mode")

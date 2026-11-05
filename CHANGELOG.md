@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-11-05
+
+- Added local WiFi access to Kiosk's web interface.
+- Documented optional screenless Kiosk updates, tested through 2026.11.7.
+
 ## 2026-11-04
 
 - Updated the tested Echo Plus 2 from Kiosk Satellite 2026.10.45 to

@@ -1,6 +1,7 @@
 #ifndef LIDAR_EARLY_GATE_H
 #define LIDAR_EARLY_GATE_H
 
+#include <arpa/inet.h>
 #include <net/if.h>
 #include <netinet/in.h>
 #include <sys/ioctl.h>
@@ -209,6 +210,50 @@ static int gate_has_wlan_ipv4(void) {
     return okay;
 }
 
+/* Limit Kiosk's web interface to the directly connected private WiFi subnet.
+ * The interface address is assigned only after the gate has let WiFi up. */
+static int gate_kiosk_subnet(char output[32]) {
+    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return -errno;
+    struct ifreq address = {0}, netmask = {0};
+    strncpy(address.ifr_name, "wlan0", IFNAMSIZ - 1);
+    strncpy(netmask.ifr_name, "wlan0", IFNAMSIZ - 1);
+    int okay = ioctl(fd, SIOCGIFADDR, &address) == 0 &&
+               ioctl(fd, SIOCGIFNETMASK, &netmask) == 0;
+    int saved = errno;
+    close(fd);
+    if (!okay) return -saved;
+    uint32_t ip = ntohl(((struct sockaddr_in *)&address.ifr_addr)->sin_addr.s_addr);
+    uint32_t mask = ntohl(((struct sockaddr_in *)&netmask.ifr_netmask)->sin_addr.s_addr);
+    uint32_t inverse = ~mask;
+    unsigned prefix = (unsigned)__builtin_popcount(mask);
+    if ((inverse & (inverse + 1U)) != 0 || prefix < 16 || prefix > 30)
+        return -EINVAL;
+    if ((ip & 0xff000000U) != 0x0a000000U &&
+        (ip & 0xfff00000U) != 0xac100000U &&
+        (ip & 0xffff0000U) != 0xc0a80000U) return -EACCES;
+    struct in_addr network = { .s_addr = htonl(ip & mask) };
+    char address_text[INET_ADDRSTRLEN];
+    if (!inet_ntop(AF_INET, &network, address_text, sizeof(address_text)))
+        return -errno;
+    int size = snprintf(output, 32, "%s/%u", address_text, prefix);
+    return size > 0 && size < 32 ? 0 : -ENOSPC;
+}
+
+static int gate_allow_kiosk_web(void) {
+    if (gate_kiosk_uid() <= 0) return 0;
+    char subnet[32];
+    int result = gate_kiosk_subnet(subnet);
+    if (result != 0) return result;
+    const char *const check[] = {GATE_IP4, "-C", "INPUT", "-i", "wlan0",
+        "-s", subnet, "-p", "tcp", "--dport", "2324", "-j", "ACCEPT", NULL};
+    if (gate_run(check) == 0) return 0;
+    const char *const insert[] = {GATE_IP4, "-I", "INPUT", "1", "-i", "wlan0",
+        "-s", subnet, "-p", "tcp", "--dport", "2324", "-j", "ACCEPT", NULL};
+    if (gate_run(insert) != 0 || gate_run(check) != 0) return -EIO;
+    return 0;
+}
+
 #define GATE_V4(...) gate_run((const char *const[]){GATE_IP4, "-t", "mangle", __VA_ARGS__, NULL})
 #define GATE_V6(...) gate_run((const char *const[]){GATE_IP6, "-t", "mangle", __VA_ARGS__, NULL})
 
@@ -383,6 +428,13 @@ static int gate_persist_wifi_off(void) {
         (void)gate_settings_wifi(1);
         return -ENETDOWN;
     }
+    int kiosk_web = gate_allow_kiosk_web();
+    int log = open(GATE_LOG, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+    if (log >= 0) {
+        dprintf(log, "KIOSK_WEB_LAN port=2324 rc=%d\n", kiosk_web);
+        close(log);
+    }
+    /* A Kiosk web failure must not take down the independent WiFi gate. */
     return 0;
 }
 
