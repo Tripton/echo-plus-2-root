@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-11-10
+
+- Use Kamakiri2 for Linux `dump` and `boot` because Linux rejected the older Kamakiri USB request.
+- Allowed ten root attempts across separate boots after one stalled start exhausted the previous single attempt. A skipped attempt recovered on the next boot.
+- Added `recover-root` for exhausted attempts.
+
 ## 2026-11-05
 
 - Added local WiFi access to Kiosk's web interface.

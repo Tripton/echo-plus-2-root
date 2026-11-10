@@ -182,14 +182,19 @@ public final class ProbeService extends Service {
         File budget = new File(getFilesDir(), "autoroot_budget_v146");
         File next = new File(getFilesDir(), "autoroot_budget_v146.tmp");
         try (FileOutputStream output = new FileOutputStream(next)) {
-            output.write('1');
+            output.write(Integer.toString(BootAttemptGuard.MAX_ATTEMPTS)
+                .getBytes(StandardCharsets.US_ASCII));
             output.getFD().sync();
         } catch (Exception error) {
             return "write_" + error.getClass().getSimpleName();
         }
         if (!next.renameTo(budget)) return "rename_failed";
         try (java.io.FileInputStream input = new java.io.FileInputStream(budget)) {
-            if (input.read() != '1' || input.read() != -1) return "readback_failed";
+            byte[] expected = Integer.toString(BootAttemptGuard.MAX_ATTEMPTS)
+                .getBytes(StandardCharsets.US_ASCII);
+            for (byte digit : expected)
+                if (input.read() != (digit & 0xff)) return "readback_failed";
+            if (input.read() != -1) return "readback_failed";
         } catch (Exception error) {
             return "readback_" + error.getClass().getSimpleName();
         }
@@ -206,7 +211,7 @@ public final class ProbeService extends Service {
                 catch (Exception ignored) { }
             }
         }
-        return "armed_one_boot";
+        return "armed_ten_boots";
     }
 
     private void runColdBoot(String source) {
@@ -242,7 +247,7 @@ public final class ProbeService extends Service {
             && identity.startsWith("EXEC_ID_V146 exit=0 output=uid=0")
             && capabilities.contains("0000003fffffffff");
 
-        // 5. The app may reserve another single attempt only after this proof.
+        // 5. A confirmed root restores up to ten separate-boot attempts.
         String rearm = rootConfirmed ? armNextBoot() : "not_confirmed";
         String earlyGate = rootConfirmed
             ? EarlyWifiGate.releaseAfterConfirmedRoot(this) : "root_not_confirmed";

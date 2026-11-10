@@ -258,7 +258,10 @@ def capture(args: argparse.Namespace, loader: Path, payload: Path) -> None:
     from mtkclient.config.mtk_config import MtkConfig
 
     config = MtkConfig(loglevel=logging.INFO)
-    config.ptype = "kamakiri"
+    # The older Kamakiri control request is rejected by Linux usbfs. The
+    # Kamakiri2 path completed a checked read-only capture on this unit in an
+    # Arch Linux ARM guest without changing the pinned MTKClient source.
+    config.ptype = "kamakiri2" if sys.platform.startswith("linux") else "kamakiri"
     config.payloadfile = str(payload)
     config.loader = str(loader)
     config.hwparam_path = str(args.output_dir)

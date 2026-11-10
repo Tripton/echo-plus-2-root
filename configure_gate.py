@@ -346,7 +346,8 @@ def verify_saved_preboot(amazon_lockdown: bool) -> None:
                                if entry.get("name") == "wifi_on"), None)
             saved_packages = {entry.get("name"): entry.attrib
                               for entry in packages.iter() if entry.get("name")}
-            ready = (budget.strip() == "1" and saved_wifi == "0" and
+            ready = (budget.strip() in {str(value) for value in range(1, 11)}
+                     and saved_wifi == "0" and
                      saved_packages.get(PACKAGE, {}).get("stopped") != "true")
             if amazon_lockdown:
                 ready = (ready and

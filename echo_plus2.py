@@ -316,7 +316,67 @@ def boot(private: Path, tools: dict[str, object], *, resume: bool = False) -> No
     if not re.fullmatch(r"[0-9a-f-]{36}", state["recovery_boot_id"]):
         raise RuntimeError("Could not identify this temporary recovery boot")
     save_state(private, state)
-    print("TEMPORARY_ROOT_READY. Next: python3 echo_plus2.py persist", flush=True)
+    print("TEMPORARY_ROOT_READY. Next: persist for initial setup, or recover-root to rearm a spent attempt", flush=True)
+
+
+def recover_root(private: Path) -> None:
+    """Allow one more cold-boot attempt after a checked USB RAM recovery."""
+    state = read_state(private)
+    if not state.get("usb_serial") or not state.get("recovery_boot_id"):
+        raise RuntimeError("Run python3 echo_plus2.py boot first")
+    serial = wait_recovery(state["usb_serial"])
+    boot_id = adb("shell", "cat /proc/sys/kernel/random/boot_id").strip()
+    if serial != state["usb_serial"] or boot_id != state["recovery_boot_id"]:
+        raise RuntimeError("USB recovery differs from the saved Echo or boot session")
+    partitions = adb("shell", "cat /proc/partitions")
+    if not any(re.fullmatch(r"\s*179\s+16\s+4987375\s+mmcblk0p16\s*", line)
+               for line in partitions.splitlines()):
+        raise RuntimeError("The checked Echo userdata partition is absent")
+    if any(line.split()[1] == "/data" for line in adb("shell", "cat /proc/mounts").splitlines()):
+        raise RuntimeError("/data is already mounted; inspect this recovery before continuing")
+    if adb("shell", "if [ -e /dev/mmcblk0p16 ]; then echo present; else echo absent; fi").strip() != "absent":
+        raise RuntimeError("The temporary userdata device node already exists")
+
+    adb("shell", "mknod /dev/mmcblk0p16 b 179 16")
+    adb("shell", "mount -t ext4 -o rw /dev/mmcblk0p16 /data")
+    budget = "/data/data/org.local.lidar.binderprobe/files/autoroot_budget_v146"
+    outcome = ""
+    try:
+        mounts = adb("shell", "cat /proc/mounts")
+        if not any(line.startswith("/dev/mmcblk0p16 /data ext4 rw,")
+                   for line in mounts.splitlines()):
+            raise RuntimeError("The checked userdata partition is not mounted read-write")
+        adb("shell", f"test -f {budget} && test ! -L {budget}")
+        before = adb("exec-out", "cat", budget)
+        if before not in {str(value) for value in range(11)}:
+            raise RuntimeError("Root attempt budget is missing or has unexpected contents")
+        backup = private / ("autoroot-budget-before-"
+                            + time.strftime("%Y%m%d-%H%M%S-")
+                            + secrets.token_hex(4) + ".bin")
+        fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as output:
+            output.write(before.encode("ascii"))
+            output.flush()
+            os.fsync(output.fileno())
+        print(f"Saved the original root-attempt budget privately: {backup}", flush=True)
+        if before == "0":
+            command = (f"set -eu; p={budget}; "
+                       '[ "$(cat "$p")" = 0 ]; '
+                       '[ "$(wc -c < "$p")" -eq 1 ]; '
+                       'printf 1 > "$p"; sync; '
+                       '[ "$(cat "$p")" = 1 ]; '
+                       '[ "$(wc -c < "$p")" -eq 1 ]')
+            adb("shell", command)
+            if adb("exec-out", "cat", budget) != "1":
+                raise RuntimeError("The one-attempt budget did not read back as 1")
+            outcome = "ROOT_ATTEMPT_REARMED"
+        else:
+            outcome = "ROOT_ATTEMPT_ALREADY_ARMED"
+    finally:
+        adb("shell", "sync; umount /data")
+    if any(line.split()[1] == "/data" for line in adb("shell", "cat /proc/mounts").splitlines()):
+        raise RuntimeError("/data did not unmount cleanly")
+    print(outcome + ": power-cycle normally with Action released, then check the new boot", flush=True)
 
 
 def persist(private: Path, tools: dict[str, object], *, resume_stock: bool = False) -> None:
@@ -535,6 +595,7 @@ def main() -> None:
     boot_parser = commands.add_parser("boot", help="boot temporary root from RAM")
     boot_parser.add_argument("--resume", action="store_true",
                              help="adopt the current USB recovery after an interrupted boot command")
+    commands.add_parser("recover-root", help="back up and rearm one cold-boot root attempt from USB RAM recovery")
     persist_parser = commands.add_parser("persist", help="install cold-boot root from the running temporary recovery")
     persist_parser.add_argument("--resume-stock", action="store_true",
                                 help="finish installation after a checked stock-init handoff")
@@ -569,6 +630,10 @@ def main() -> None:
         use_sdk_platform_tools(detect_sdk())
         verify_usb_identity(private)
         configure_gate.start_kiosk()
+        return
+    if args.stage == "recover-root":
+        use_sdk_platform_tools(detect_sdk())
+        recover_root(private)
         return
     if args.stage in {"configure", "gate-status"}:
         sdk = detect_sdk()

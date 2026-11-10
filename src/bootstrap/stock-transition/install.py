@@ -391,7 +391,8 @@ def app_stopped_on_disk(args: argparse.Namespace) -> bool:
     return matches[0].get("stopped") == "true"
 
 
-def activate_app_for_next_boot(args: argparse.Namespace, budget: str) -> None:
+def activate_app_for_next_boot(args: argparse.Namespace, budget: str,
+                               expected_budget: bytes) -> None:
     """Start the app without exploit flags, then verify durable unstopped state."""
     # ProbeService returns immediately without both exact exploit flags and a
     # boot-receiver source. Starting it clears Android's stopped-package state.
@@ -410,13 +411,13 @@ def activate_app_for_next_boot(args: argparse.Namespace, budget: str) -> None:
     status = adb(args, "shell", "dumpsys", "package", PACKAGE, timeout=40)
     if not re.search(r"User 0:.*installed=true.*stopped=false", status):
         raise RuntimeError("saved and live package states disagree")
-    if adb_bytes(args, "exec-out", "cat", budget) != b"1":
-        raise RuntimeError("no-op activation changed the one-boot budget")
+    if adb_bytes(args, "exec-out", "cat", budget) != expected_budget:
+        raise RuntimeError("no-op activation changed the root-attempt budget")
     print("CHECKPOINT_INSTALL_APP_ACTIVE_ON_DISK_OK", flush=True)
 
 
 def install_and_arm_app(args: argparse.Namespace, files: dict[str, bytes]) -> None:
-    """8. Register the signed APK and reserve exactly one next-boot attempt."""
+    """8. Register the signed APK and allow ten attempts on separate boots."""
     # This is an initial install, never an upgrade of an app-controlled tree.
     installed = adb(args, "shell", "pm", "list", "packages", PACKAGE).splitlines()
     if f"package:{PACKAGE}" not in installed:
@@ -471,14 +472,15 @@ def install_and_arm_app(args: argparse.Namespace, files: dict[str, bytes]) -> No
     armed = adb(args, "shell", f"if test -f {budget} && test ! -L {budget}; then echo yes; fi")
     if armed == "yes":
         adb(args, "shell", f"test -d {files_dir} && test ! -L {files_dir}")
+        existing_budget = adb_bytes(args, "exec-out", "cat", budget)
         if (adb(args, "shell", "stat", "-c", "%u:%g:%a", files_dir) != owner + ":700"
                 or adb(args, "shell", "ls", "-Zd", files_dir).split()[0] != label
-                or adb_bytes(args, "exec-out", "cat", budget) != b"1"
+                or existing_budget not in {str(value).encode("ascii") for value in range(1, 11)}
                 or adb(args, "shell", "stat", "-c", "%u:%g:%a", budget) != owner + ":600"
                 or adb(args, "shell", "ls", "-Z", budget).split()[0] != label):
-            raise RuntimeError("existing one-boot budget content, owner, mode or label differs")
-        activate_app_for_next_boot(args, budget)
-        print("CHECKPOINT_INSTALL_APP_ARMED_FOR_ONE_STOCK_BOOT_OK: verified existing install", flush=True)
+            raise RuntimeError("existing root-attempt budget content, owner, mode or label differs")
+        activate_app_for_next_boot(args, budget, existing_budget)
+        print("CHECKPOINT_INSTALL_APP_ARMED_FOR_STOCK_BOOT_OK: verified existing install", flush=True)
         return
     adb(args, "shell", f"test ! -e {files_dir} && test ! -L {files_dir}")
     adb(args, "shell", "mkdir", files_dir)
@@ -489,21 +491,21 @@ def install_and_arm_app(args: argparse.Namespace, files: dict[str, bytes]) -> No
             or adb(args, "shell", "ls", "-Zd", files_dir).split()[0] != label):
         raise RuntimeError("app files directory owner or SELinux label differs")
     adb(args, "shell", f"test ! -e {budget} && test ! -L {budget} && test ! -e {staged_budget} && test ! -L {staged_budget}")
-    adb(args, "shell", f"printf 1 > {staged_budget}")
+    adb(args, "shell", f"printf 10 > {staged_budget}")
     adb(args, "shell", "chown", owner, staged_budget)
     adb(args, "shell", "chmod", "0600", staged_budget)
     adb(args, "shell", "chcon", label, staged_budget)
-    if (adb_bytes(args, "exec-out", "cat", staged_budget) != b"1"
+    if (adb_bytes(args, "exec-out", "cat", staged_budget) != b"10"
             or adb(args, "shell", "stat", "-c", "%u:%g", staged_budget) != owner
             or adb(args, "shell", "ls", "-Zd", staged_budget).split()[0] != label):
-        raise RuntimeError("staged one-boot budget content, owner or label differs")
+        raise RuntimeError("staged root-attempt budget content, owner or label differs")
     adb(args, "shell", "mv", staged_budget, budget)
-    if (adb_bytes(args, "exec-out", "cat", budget) != b"1"
+    if (adb_bytes(args, "exec-out", "cat", budget) != b"10"
             or adb(args, "shell", "stat", "-c", "%u:%g", budget) != owner
             or adb(args, "shell", "ls", "-Zd", budget).split()[0] != label):
-        raise RuntimeError("one-boot budget content, owner or label differs")
-    activate_app_for_next_boot(args, budget)
-    print("CHECKPOINT_INSTALL_APP_ARMED_FOR_ONE_STOCK_BOOT_OK", flush=True)
+        raise RuntimeError("root-attempt budget content, owner or label differs")
+    activate_app_for_next_boot(args, budget, b"10")
+    print("CHECKPOINT_INSTALL_APP_ARMED_FOR_STOCK_BOOT_OK", flush=True)
 
 
 def main() -> None:

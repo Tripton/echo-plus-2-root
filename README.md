@@ -1,6 +1,6 @@
 # Echo Plus 2 Root
 
-Root the **Echo Plus (2nd generation), model L9D29R**, on the tested `NS6575/8338N` firmware. The first stage uses [MTKClient](https://github.com/bkerler/mtkclient)'s Kamakiri BootROM exploit to start a temporary recovery from RAM. The second installs an app that uses the Binder use-after-free bug **[CVE-2019-2215](https://projectzero.google/2019/11/bad-binder-android-in-wild-exploit.html)** to regain root after an ordinary cold boot. Amazon's signed kernel still boots. This does not install a custom ROM.
+Root the **Echo Plus (2nd generation), model L9D29R**, on the tested `NS6575/8338N` firmware. The first stage uses [MTKClient](https://github.com/bkerler/mtkclient)'s Kamakiri or Kamakiri2 BootROM path to start a temporary recovery from RAM. The second installs an app that uses the Binder use-after-free bug **[CVE-2019-2215](https://projectzero.google/2019/11/bad-binder-android-in-wild-exploit.html)** to regain root after an ordinary cold boot. Amazon's signed kernel still boots. This does not install a custom ROM.
 
 **Rooting and wiring can cause data loss or device damage. Proceed at your own risk.** The BootROM entry point is fixed in the chip, so a firmware update cannot remove it. If the device still reaches BootROM, stage 1 offers a way back to temporary root. This does not make the Echo unbrickable, and a factory reset cannot repair damaged firmware or hardware.
 
@@ -16,7 +16,9 @@ Connect these contacts to your computer with USB data. Keep the Echo's power sup
 
 ## Prepare the computer
 
-I tested the host workflow on macOS. Linux x86-64 has corresponding build paths, but treat it as experimental until someone completes a device run there. Install Python 3.11 or newer to run this guide, [uv](https://docs.astral.sh/uv/getting-started/installation/), Git, JDK (`javac` and `keytool`), `zip`, Android SDK Platform 36, Build Tools 36.0.0, NDK 28.2.13676358, Platform Tools, and LLVM Clang/LLD/llvm-objcopy **23.1.3**. Set `ANDROID_SDK_ROOT` if the SDK is outside its usual location.
+I tested the full host workflow on macOS, and the `dump` and `boot` USB stages on Arch Linux ARM in a UTM VM. MTKClient implements Kamakiri and Kamakiri2 as separate BootROM exploit paths. The older Kamakiri USB request failed under Linux usbfs in my tests. Kamakiri2 uses different USB transfers and loaded the same Stage 1 payload. A native Linux x86-64 end-to-end run is still untested.
+
+Install Python 3.11 or newer to run this guide, [uv](https://docs.astral.sh/uv/getting-started/installation/), Git, JDK (`javac` and `keytool`), `zip`, Android SDK Platform 36, Build Tools 36.0.0, NDK 28.2.13676358, Platform Tools, and LLVM Clang/LLD/llvm-objcopy **23.1.3**. Set `ANDROID_SDK_ROOT` if the SDK is outside its usual location.
 
 Clone the repository and enter it:
 
@@ -95,6 +97,8 @@ adb -d shell /data/local/tmp/lidar-root-client id
 ```
 
 On my unit, root was available about 1.5 minutes after a software reboot. SELinux remains globally Permissive after the exploit. A firmware update can patch this kernel bug. Temporary root through BootROM (i.e. stage 1) remains available, but would need a physical connection and a new BootROM entry after each boot.
+
+The original app allowed only one boot attempt. A stalled boot used it up and left the Echo offline. The app now tries once per boot for up to ten boots, resetting the counter after root succeeds. It cannot restart a hung device on its own.
 
 ## 3. Use root (optional)
 

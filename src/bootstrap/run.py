@@ -116,7 +116,10 @@ def handoff(args: argparse.Namespace, stages: list[tuple[int, bytes, str]]) -> N
     from mtkclient.config.mtk_config import MtkConfig
 
     config = MtkConfig(loglevel=logging.INFO)
-    config.ptype = "kamakiri"
+    # Linux usbfs rejects the interface-recipient request used by the older
+    # Kamakiri path. The upstream Kamakiri2 path was checked on this unit in
+    # an Arch Linux ARM guest: Stage 1, RAM upload and root recovery completed.
+    config.ptype = "kamakiri2" if sys.platform.startswith("linux") else "kamakiri"
     config.hwparam_path = str(args.built_dir)
     mtk = Mtk(config=config, loglevel=logging.INFO)
     try:

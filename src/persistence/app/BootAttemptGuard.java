@@ -13,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 final class BootAttemptGuard {
     private static final String BUDGET = "autoroot_budget_v146";
     private static final String MARKER = "autoroot_attempt_boot_v149";
+    static final int MAX_ATTEMPTS = 10;
 
     static final class Result {
         final boolean reserved;
@@ -60,9 +61,16 @@ final class BootAttemptGuard {
 
             int remaining;
             try (FileInputStream input = new FileInputStream(budget)) {
-                remaining = input.read() - '0';
-                if (remaining < 1 || remaining > 2 || input.read() != -1)
+                byte[] value = new byte[3];
+                int length = 0;
+                int next;
+                while (length < value.length && (next = input.read()) != -1)
+                    value[length++] = (byte) next;
+                String digits = new String(value, 0, length, StandardCharsets.US_ASCII);
+                if (input.read() != -1 ||
+                    !(digits.matches("[1-9]") || "10".equals(digits)))
                     return new Result(false, count, "budget_empty_or_invalid");
+                remaining = Integer.parseInt(digits);
             }
 
             // Reserve before spending the budget and before touching Binder.
@@ -76,7 +84,8 @@ final class BootAttemptGuard {
 
             File budgetNext = new File(context.getFilesDir(), BUDGET + ".tmp");
             try (FileOutputStream output = new FileOutputStream(budgetNext)) {
-                output.write('0' + remaining - 1);
+                output.write(Integer.toString(remaining - 1)
+                    .getBytes(StandardCharsets.US_ASCII));
                 output.getFD().sync();
             }
             if (!budgetNext.renameTo(budget))
