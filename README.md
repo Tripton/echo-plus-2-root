@@ -1,6 +1,6 @@
 # Echo Plus 2 Root
 
-Root the **Echo Plus (2nd generation), model L9D29R**, on the tested `NS6575/8338N` firmware. The first stage uses [MTKClient](https://github.com/bkerler/mtkclient)'s Kamakiri or Kamakiri2 BootROM path to start a temporary recovery from RAM. The second installs an app that uses the Binder use-after-free bug **[CVE-2019-2215](https://projectzero.google/2019/11/bad-binder-android-in-wild-exploit.html)** to regain root after an ordinary cold boot. Amazon's signed kernel still boots. This does not install a custom ROM.
+Root the **Echo Plus (2nd generation), model L9D29R**, on the tested `NS6575/8338N` firmware (device software version `13323244164`, possibly shown with leading zeros in the Alexa app). The first stage uses [MTKClient](https://github.com/bkerler/mtkclient)'s Kamakiri or Kamakiri2 BootROM path to start a temporary recovery from RAM. The second installs an app that uses the Binder use-after-free bug **[CVE-2019-2215](https://projectzero.google/2019/11/bad-binder-android-in-wild-exploit.html)** to regain root after an ordinary cold boot. Amazon's signed kernel still boots. This does not install a custom ROM.
 
 **Rooting and wiring can cause data loss or device damage. Proceed at your own risk.** The BootROM entry point is fixed in the chip, so a firmware update cannot remove it. If the device still reaches BootROM, stage 1 offers a way back to temporary root. This does not make the Echo unbrickable, and a factory reset cannot repair damaged firmware or hardware.
 
@@ -56,6 +56,8 @@ python3 echo_plus2.py dump
 Keep USB data connected. **Wait until the device search begins.** Then hold **Action** (the button marked with a dot) while supplying power to the Echo. Release it when BootROM is detected. You do not need to hold it during the long capture output.
 
 The command reads the preloader, partition table, and boot images needed for the next step from your Echo. It checks each image and builds the RAM image. This captures only the files needed for the guide, not a full eMMC backup. The command reads eMMC without changing it. It does **not** start Android or provide ADB yet.
+
+If the preloader differs from the supported firmware, `dump` still saves its twice-checked bytes to `local/device/preloader-from-sram.bin`, then stops before accessing eMMC or building a RAM image. If a later image differs, the files read so far remain under `local/device/`, but no RAM image is built.
 
 To start the temporary root with the prepared RAM image, disconnect power again, keep USB data connected, and run:
 

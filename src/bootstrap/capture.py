@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Read the exact supported Echo Plus 2 boot inputs from the owner's device.
+"""Read Echo Plus 2 boot inputs from the owner's device.
 
 Without --run this checks only local MTKClient files. With --run it uses the
 known BootROM entry, uploads MTKClient's download agents into RAM, and reads
 bounded eMMC USER ranges. It never programs, erases, or selects BOOT1/BOOT2.
-The output is private firmware material and belongs in the ignored local/device
+The preloader is saved after two matching SRAM reads, even when its firmware is
+unsupported. Later eMMC reads require the checked preloader and DA setup. The
+output is private firmware material and belongs in the ignored local/device
 directory or another private directory.
 """
 
@@ -83,19 +85,27 @@ def read_sram(mtk, address: int, length: int) -> bytes:
     return bytes(result)
 
 
-def capture_preloader(mtk) -> bytes:
+def capture_preloader(mtk, output: Path) -> bytes:
     prefix = read_sram(mtk, SRAM_BASE, 0x10000)
+    if prefix != read_sram(mtk, SRAM_BASE, 0x10000):
+        raise RuntimeError("SRAM preloader header changed between reads")
     offset = prefix.find(PRELOADER_MAGIC)
     if offset < 0 or offset + 0x24 > len(prefix):
         raise RuntimeError("preloader header was not found in SRAM")
     length = struct.unpack_from("<I", prefix, offset + 0x20)[0]
     address = SRAM_BASE + offset
-    if length != PINNED["preloader"][0] or address + length > SRAM_END:
-        raise RuntimeError("SRAM preloader length or address differs")
-    data = read_sram(mtk, address, (length + 3) & ~3)[:length]
-    if sha(data) != PINNED["preloader"][1]:
-        raise RuntimeError("SRAM preloader differs from the supported 8338N image")
-    print("CHECKPOINT_CAPTURE_PRELOADER_OK", flush=True)
+    padded_length = (length + 3) & ~3
+    if offset % 4 or length < 0x1000 or address + padded_length > SRAM_END:
+        raise RuntimeError(f"preloader header is outside SRAM: address=0x{address:x} bytes={length}")
+    data = read_sram(mtk, address, padded_length)[:length]
+    if data != read_sram(mtk, address, padded_length)[:length]:
+        raise RuntimeError("SRAM preloader changed between reads")
+    if data[:8] != PRELOADER_MAGIC or struct.unpack_from("<I", data, 0x20)[0] != length:
+        raise RuntimeError("SRAM preloader header changed during capture")
+    path = output / "preloader-from-sram.bin"
+    save_new_or_equal(path, data)
+    print(f"CHECKPOINT_CAPTURE_PRELOADER_SAVED address=0x{address:x} "
+          f"bytes={length} sha256={sha(data)}", flush=True)
     return data
 
 
@@ -290,7 +300,10 @@ def capture(args: argparse.Namespace, loader: Path, payload: Path) -> None:
             raise RuntimeError("BootROM security flags remain enabled")
         mtk.config.target_config = status
         print("CAPTURE_READING_PRELOADER", flush=True)
-        preloader = capture_preloader(mtk)
+        preloader = capture_preloader(mtk, args.output_dir)
+        if (len(preloader), sha(preloader)) != PINNED["preloader"]:
+            raise RuntimeError("Preloader saved, but this firmware is not supported by the RAM image")
+        print("CHECKPOINT_CAPTURE_PRELOADER_OK", flush=True)
 
         dc = mtk.daloader.daconfig
         entry = dc.setup()
@@ -338,29 +351,26 @@ def capture(args: argparse.Namespace, loader: Path, payload: Path) -> None:
         print("CAPTURE_READING_PARTITION_TABLE", flush=True)
         primary = read_twice(mtk, 0, WINDOW)
         backup = read_twice(mtk, USER_BYTES - WINDOW, WINDOW)
+        output = args.output_dir
+        save_new_or_equal(output / "gpt-primary-window.bin", primary)
+        save_new_or_equal(output / "gpt-backup-window.bin", backup)
         report = check_gpt(primary, backup)
         report["meid_sha256"] = meid_hash
         misc = read_twice(mtk, 51200 * SECTOR, 4096)
+        save_new_or_equal(output / "misc-window.bin", misc)
         check_active_a(misc)
-        images = {}
+        different_images = []
         for name, (lba, size, expected_sha) in PARTITIONS.items():
             print(f"CAPTURE_READING_{name.upper()} bytes={size} twice", flush=True)
             image = read_twice(mtk, lba * SECTOR, size)
+            filename = "boot_a-live.bin" if name == "boot_a" else f"{name}.bin"
+            save_new_or_equal(output / filename, image)
             if sha(image) != expected_sha:
-                raise RuntimeError(f"{name} differs from the supported 8338N image")
-            images[name] = image
-            print(f"CHECKPOINT_CAPTURE_{name.upper()}_OK bytes={size}", flush=True)
-        # Save only after every image, both GPT copies, and the active-A
-        # record passed. None of the device's eMMC bytes are changed.
-        print("CAPTURE_SAVING_VERIFIED_FILES", flush=True)
-        output = args.output_dir
-        save_new_or_equal(output / "preloader-from-sram.bin", preloader)
-        save_new_or_equal(output / "gpt-primary-window.bin", primary)
-        save_new_or_equal(output / "gpt-backup-window.bin", backup)
-        save_new_or_equal(output / "misc-window.bin", misc)
-        save_new_or_equal(output / "lk_a.bin", images["lk_a"])
-        save_new_or_equal(output / "lk_b.bin", images["lk_b"])
-        save_new_or_equal(output / "boot_a-live.bin", images["boot_a"])
+                different_images.append(name)
+            else:
+                print(f"CHECKPOINT_CAPTURE_{name.upper()}_OK bytes={size}", flush=True)
+        if different_images:
+            raise RuntimeError("Images saved but unsupported: " + ", ".join(different_images))
         save_new_or_equal(output / "capture-report.json",
                           (json.dumps(report, indent=2) + "\n").encode())
         print(f"CAPTURE_READY: private files saved under {output}", flush=True)

@@ -3,6 +3,8 @@
 ## 2026-11-10
 
 - Use Kamakiri2 for Linux `dump` and `boot` because Linux rejected the older Kamakiri USB request.
+- Save twice-read firmware data before build-specific checks, so unsupported builds yield captures for locating offsets. A different preloader still stops further eMMC reads.
+- Confirmed a live read-only `dump` in an Arch Linux ARM UTM VM. All seven captures matched the independent macOS dump.
 - Allowed ten root attempts across separate boots after one stalled start exhausted the previous single attempt. A skipped attempt recovered on the next boot.
 - Added `recover-root` for exhausted attempts.
 
