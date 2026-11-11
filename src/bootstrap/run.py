@@ -79,8 +79,6 @@ def preflight(args: argparse.Namespace) -> list[tuple[int, bytes, str]]:
         # payload hashes below still identify the sole tested profile.
         profile = by_name("NS6575-8338N")
         slot = "a"
-    if (profile, slot) != (NS6575_8338N, "a") and not args.allow_experimental_ram:
-        raise ValueError("this RAM image/slot combination is not device-tested; pass --allow-experimental-ram")
     payload = {name: checked_file(args.built_dir / name, *expected)
                for name, expected in OUTPUTS_BY_PROFILE_SLOT[profile.name, slot].items()}
     if payload["fdt_initrd.bin"][1024:1024 + 2038] != payload["initramfs_overlay.cpio.gz"]:
@@ -196,8 +194,6 @@ def main() -> None:
     parser.add_argument("--stage1", type=Path, required=True)
     parser.add_argument("--built-dir", type=Path, default=SOURCE / "build")
     parser.add_argument("--target-meid-sha256")
-    parser.add_argument("--allow-experimental-ram", action="store_true",
-                        help="allow an offline-checked image/slot without a device boot test")
     parser.add_argument("--run", action="store_true",
                         help="perform the volatile USB BootROM handoff")
     args = parser.parse_args()

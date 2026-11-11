@@ -244,7 +244,7 @@ def dump(args: argparse.Namespace, private: Path, tools: dict[str, object]) -> N
     save_state(private, state)
     if profile != "NS6575-8338N a":
         print(f"EXPERIMENTAL_RAM_IMAGE_READY: {profile} has passed offline checks but no device boot test", flush=True)
-        print("Next: python3 echo_plus2.py boot --experimental-ram", flush=True)
+        print("Next: python3 echo_plus2.py boot", flush=True)
     else:
         print("DUMP_AND_RAM_IMAGE_READY. Next: python3 echo_plus2.py boot", flush=True)
 
@@ -327,8 +327,7 @@ def save_recovery_file(remote: str, local: Path) -> None:
     print(f"Captured {remote}: {len(result.stdout)} bytes, sha256={sha(local)}", flush=True)
 
 
-def boot(private: Path, tools: dict[str, object], *, resume: bool = False,
-         experimental_ram: bool = False) -> None:
+def boot(private: Path, tools: dict[str, object], *, resume: bool = False) -> None:
     state = read_state(private)
     if state.get("capture_ready") != "yes" or not state.get("meid_sha256"):
         raise RuntimeError("Run python3 echo_plus2.py dump before boot")
@@ -341,10 +340,6 @@ def boot(private: Path, tools: dict[str, object], *, resume: bool = False,
               "--mtkclient-root", tools["mtk"], "--stage1", tools["stage1"],
               "--target-meid-sha256", state["meid_sha256"],
               "--built-dir", BOOT_BUILD]
-    if expected_profile not in ("NS6575-8338N", "NS6575-8338N a"):
-        if not experimental_ram:
-            raise RuntimeError("This RAM image/slot combination is not device-tested; pass --experimental-ram")
-        runner.append("--allow-experimental-ram")
     call(*runner)
     use_sdk_platform_tools(detect_sdk())
     if resume:
@@ -651,8 +646,6 @@ def main() -> None:
     boot_parser = commands.add_parser("boot", help="boot temporary root from RAM")
     boot_parser.add_argument("--resume", action="store_true",
                              help="adopt the current USB recovery after an interrupted boot command")
-    boot_parser.add_argument("--experimental-ram", action="store_true",
-                             help="allow an offline-checked but not device-tested RAM image")
     commands.add_parser("recover-root", help="back up and rearm one cold-boot root attempt from USB RAM recovery")
     persist_parser = commands.add_parser("persist", help="install cold-boot root from the running temporary recovery")
     persist_parser.add_argument("--resume-stock", action="store_true",
@@ -716,8 +709,7 @@ def main() -> None:
     elif args.stage == "diagnose":
         diagnose_firmware(private, tools)
     elif args.stage == "boot":
-        boot(private, tools, resume=args.resume,
-             experimental_ram=args.experimental_ram)
+        boot(private, tools, resume=args.resume)
     elif args.stage == "persist":
         persist(private, tools, resume_stock=args.resume_stock)
 

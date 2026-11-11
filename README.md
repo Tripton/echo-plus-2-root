@@ -57,7 +57,7 @@ Keep USB data connected. **Wait until the device search begins.** Then hold **Ac
 
 The command reads the preloader, partition table, and active boot images needed for the next step from your Echo. It checks each image and builds the RAM image. This captures only the files needed for the guide, not a full eMMC backup. The command reads eMMC without changing it. It does **not** start Android or provide ADB yet.
 
-The RAM stage reads the active A/B slot and matches its preloader, LK, and boot image to an exact firmware profile. The slot selects the partitions. The image contents select the patch offsets. `NS6536/2509N`, `NS6541/2965N` and `NS65741/8149N` pass offline build checks for either slot, but still need a device boot test. For one of these profiles, use `python3 echo_plus2.py boot --experimental-ram`. If the active slot changes after `dump`, run `dump` again before `boot`.
+The RAM stage reads the active A/B slot and matches its preloader, LK, and boot image to an exact firmware profile. The slot selects the partitions. The image contents select the patch offsets. `NS6536/2509N`, `NS6541/2965N` and `NS65741/8149N` pass offline build checks for either slot, but still need a device boot test. Use the same `boot` command below for each supported profile. If the active slot changes after `dump`, run `dump` again before `boot`.
 
 **If your firmware is not recognized:**
 
@@ -94,7 +94,7 @@ To install the app, run:
 python3 echo_plus2.py persist
 ```
 
-For another exact image or slot, use the same `persist` command after `boot --experimental-ram`. The installer checks the captured image, stock files, system fingerprint, and selected slot before installation. On later boots, the app checks the firmware fingerprint and, for the new profiles, the kernel version before attempting root. If a check fails, inspect the private captures before retrying. Do not substitute offsets from a nearby firmware build.
+For another exact image or slot, use the same `persist` command after `boot`. The installer checks the captured image, stock files, system fingerprint, and selected slot before installation. On later boots, the app checks the firmware fingerprint and, for the new profiles, the kernel version before attempting root. If a check fails, inspect the private captures before retrying. Do not substitute offsets from a nearby firmware build.
 
 The first start after a factory reset can take several minutes. Wait for `INSTALL_READY_FOR_COLD_BOOT` before continuing. Keep a backup of `local/device/apk-signing.jks` and `local/device/apk-signing-password.txt`. This installation generates its own signing key; you need the same key to install a later app update without uninstalling it.
 
