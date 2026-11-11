@@ -13,6 +13,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 import configure_gate
@@ -221,6 +222,16 @@ def dump(args: argparse.Namespace, private: Path, tools: dict[str, object]) -> N
     state["capture_ready"] = "yes"
     save_state(private, state)
     print("DUMP_AND_RAM_IMAGE_READY. Next: python3 echo_plus2.py boot", flush=True)
+
+
+def diagnose_firmware(private: Path, tools: dict[str, object]) -> None:
+    output = Path(tempfile.mkdtemp(prefix="diagnostic-", dir=private))
+    prompt_cycle()
+    phase("Reading this Echo's firmware for offset analysis")
+    call(tools["python"], ROOT / "src/bootstrap/capture.py",
+         "--mtkclient-root", tools["mtk"], "--output-dir", output,
+         "--diagnose", "--run")
+    print(f"DIAGNOSTIC_FILES_READY: {output}", flush=True)
 
 
 def adb(*parts: str, capture_output: bool = True) -> str:
@@ -592,6 +603,7 @@ def main() -> None:
     commands.add_parser("check", help="check local dependencies without device access")
     dump_parser = commands.add_parser("dump", help="read and check this Echo's firmware, then build its RAM image")
     dump_parser.add_argument("--reuse", action="store_true", help="verify prior capture and rebuild offline")
+    commands.add_parser("diagnose", help="read another firmware for offset analysis without building a RAM image")
     boot_parser = commands.add_parser("boot", help="boot temporary root from RAM")
     boot_parser.add_argument("--resume", action="store_true",
                              help="adopt the current USB recovery after an interrupted boot command")
@@ -653,6 +665,8 @@ def main() -> None:
     print("HOST_PREFLIGHT_OK", flush=True)
     if args.stage == "dump":
         dump(args, private, tools)
+    elif args.stage == "diagnose":
+        diagnose_firmware(private, tools)
     elif args.stage == "boot":
         boot(private, tools, resume=args.resume)
     elif args.stage == "persist":

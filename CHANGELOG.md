@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-11
+
+- Added a read-only diagnostic dump for other firmware builds. It captures partition and boot images when the checked hardware setup matches, without building a RAM image.
+
 ## 2026-11-10
 
 - Use Kamakiri2 for Linux `dump` and `boot` because Linux rejected the older Kamakiri USB request.

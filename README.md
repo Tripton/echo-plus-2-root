@@ -59,6 +59,8 @@ The command reads the preloader, partition table, and boot images needed for the
 
 If the preloader differs from the supported firmware, `dump` still saves its twice-checked bytes to `local/device/preloader-from-sram.bin`, then stops before accessing eMMC or building a RAM image. If a later image differs, the files read so far remain under `local/device/`, but no RAM image is built.
 
+For another firmware, `python3 echo_plus2.py diagnose` saves a twice-read preloader in a new private `local/device/diagnostic-*/` directory. If the chip, DRAM setup, eMMC geometry, and partition table pass the bounded checks, it also reads LK and boot images for offset analysis. It does not build or install a RAM image. A failed check can still leave the files captured before it stopped.
+
 To start the temporary root with the prepared RAM image, disconnect power again, keep USB data connected, and run:
 
 ```sh
