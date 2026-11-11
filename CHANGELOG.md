@@ -2,7 +2,8 @@
 
 ## 2026-11-11
 
-- Added a read-only diagnostic dump for other firmware builds. It captures partition and boot images when the checked hardware setup matches, without building a RAM image.
+- Refactored the boot and kernel stages for multiple firmware builds and either A or B slot. Added offline-checked profiles for `NS6536/2509N`, `NS6541/2965N` and `NS65741/8149N`. Device tests are still pending.
+- Added `diagnose` to collect early boot images from unsupported firmware for manual offset analysis.
 
 ## 2026-11-10
 

@@ -16,10 +16,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from build import OUTPUTS, PINNED, SOURCE, align, sha
+from build import OUTPUTS_BY_PROFILE_SLOT, PINNED, SOURCE, align, sha
+from firmware_profiles import NS6575_8338N, by_name
 
 
-TESTED_MTKCLIENT_REVISION = "7cb40e727727dfe3faa065eefb29b16ed29bbdf1"
+PINNED_MTKCLIENT_REVISION = "7cb40e727727dfe3faa065eefb29b16ed29bbdf1"
 STAGE_ADDRESSES = (
     (0x201000, "preloader_patched.bin"),
     (0x226000, "lk_bridge.bin"),
@@ -48,7 +49,7 @@ def preflight(args: argparse.Namespace) -> list[tuple[int, bytes, str]]:
     untracked_package_files = subprocess.check_output(
         ["git", "-C", str(args.mtkclient_root), "ls-files", "--others",
          "--exclude-standard", "--", "mtkclient"], text=True).strip()
-    if (revision != TESTED_MTKCLIENT_REVISION or dirty != 0
+    if (revision != PINNED_MTKCLIENT_REVISION or dirty != 0
             or untracked_package_files):
         raise ValueError("MTKClient source does not match the tested revision")
     stage1_size, stage1_hash = PINNED["stage1"]
@@ -58,8 +59,30 @@ def preflight(args: argparse.Namespace) -> list[tuple[int, bytes, str]]:
 
     # 2. Confirm every offline-generated file, even the two that are embedded
     # inside the handoff image. No firmware dump is read by this launcher.
+    marker_path = args.built_dir / "firmware-profile.txt"
+    if marker_path.exists():
+        marker = marker_path.read_text()
+        if marker.count("\n") != 1 or not marker.endswith("\n"):
+            raise ValueError("RAM image profile marker is malformed")
+        parts = marker.strip().split()
+        if len(parts) == 1:
+            # Only the original 8338N A build had a verified one-field marker.
+            if parts[0] != NS6575_8338N.name:
+                raise ValueError("legacy RAM image marker has no slot; rebuild from dump")
+            parts.append("a")
+        if len(parts) != 2 or parts[1] not in ("a", "b"):
+            raise ValueError("RAM image profile marker is malformed")
+        profile = by_name(parts[0])
+        slot = parts[1]
+    else:
+        # Older, already-built 8338N directories have no marker. Their exact
+        # payload hashes below still identify the sole tested profile.
+        profile = by_name("NS6575-8338N")
+        slot = "a"
+    if (profile, slot) != (NS6575_8338N, "a") and not args.allow_experimental_ram:
+        raise ValueError("this RAM image/slot combination is not device-tested; pass --allow-experimental-ram")
     payload = {name: checked_file(args.built_dir / name, *expected)
-               for name, expected in OUTPUTS.items()}
+               for name, expected in OUTPUTS_BY_PROFILE_SLOT[profile.name, slot].items()}
     if payload["fdt_initrd.bin"][1024:1024 + 2038] != payload["initramfs_overlay.cpio.gz"]:
         raise ValueError("embedded initramfs overlay differs")
     stages = []
@@ -74,7 +97,7 @@ def preflight(args: argparse.Namespace) -> list[tuple[int, bytes, str]]:
     for (address, data, name), (next_address, _, _) in zip(stages, stages[1:]):
         if address + align(len(data), 512) > next_address:
             raise ValueError(f"SRAM staging overlap after {name}")
-    print("PREFLIGHT_BOOTSTRAP_RUN_OK: pinned payloads and SRAM layout", flush=True)
+    print(f"PREFLIGHT_BOOTSTRAP_RUN_OK: {profile.name} slot {slot.upper()} pinned payloads and SRAM layout", flush=True)
     return stages
 
 
@@ -173,6 +196,8 @@ def main() -> None:
     parser.add_argument("--stage1", type=Path, required=True)
     parser.add_argument("--built-dir", type=Path, default=SOURCE / "build")
     parser.add_argument("--target-meid-sha256")
+    parser.add_argument("--allow-experimental-ram", action="store_true",
+                        help="allow an offline-checked image/slot without a device boot test")
     parser.add_argument("--run", action="store_true",
                         help="perform the volatile USB BootROM handoff")
     args = parser.parse_args()

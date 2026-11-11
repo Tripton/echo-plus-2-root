@@ -3,7 +3,6 @@ package org.local.lidar.binderprobe;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
-import android.os.Build;
 import android.os.SystemClock;
 import android.util.Log;
 
@@ -16,12 +15,9 @@ import android.util.Log;
  */
 public final class EarlyRootReceiver extends BroadcastReceiver {
     private static final String TAG = "LidarEarlyRoot";
-    private static final String FINGERPRINT =
-        "Amazon/lidar/lidar:6.0/NS6575/8338N:user/amz-p,release-keys";
-
     @Override public void onReceive(Context context, Intent intent) {
         if (intent == null || !Intent.ACTION_LOCKED_BOOT_COMPLETED.equals(intent.getAction()) ||
-            !FINGERPRINT.equals(Build.FINGERPRINT)) return;
+            KernelProfile.detect() == null) return;
         BootAttemptGuard.Result guard = BootAttemptGuard.tryReserve(context, "early");
         Log.i(TAG, "EARLY_ROOT_RESERVE elapsed_ms=" + SystemClock.elapsedRealtime()
             + " boot_count=" + guard.bootCount + " result=" + guard.reason);

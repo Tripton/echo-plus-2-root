@@ -1,6 +1,6 @@
 # Echo Plus 2 Root
 
-Root the **Echo Plus (2nd generation), model L9D29R**, on the tested `NS6575/8338N` firmware (device software version `13323244164`, possibly shown with leading zeros in the Alexa app). The first stage uses [MTKClient](https://github.com/bkerler/mtkclient)'s Kamakiri or Kamakiri2 BootROM path to start a temporary recovery from RAM. The second installs an app that uses the Binder use-after-free bug **[CVE-2019-2215](https://projectzero.google/2019/11/bad-binder-android-in-wild-exploit.html)** to regain root after an ordinary cold boot. Amazon's signed kernel still boots. This does not install a custom ROM.
+Root the **Echo Plus (2nd generation), model L9D29R**. The full procedure was tested on `NS6575/8338N` (device software version `13323244164`, possibly shown with leading zeros in the Alexa app). Exact-image paths for `NS6536/2509N`, `NS6541/2965N` and `NS65741/8149N` are prepared for a first device test. The first stage uses [MTKClient](https://github.com/bkerler/mtkclient)'s Kamakiri or Kamakiri2 BootROM path to start a temporary recovery from RAM. The second installs an app that uses the Binder use-after-free bug **[CVE-2019-2215](https://projectzero.google/2019/11/bad-binder-android-in-wild-exploit.html)** to regain root after an ordinary cold boot. Amazon's signed kernel still boots. This does not install a custom ROM.
 
 **Rooting and wiring can cause data loss or device damage. Proceed at your own risk.** The BootROM entry point is fixed in the chip, so a firmware update cannot remove it. If the device still reaches BootROM, stage 1 offers a way back to temporary root. This does not make the Echo unbrickable, and a factory reset cannot repair damaged firmware or hardware.
 
@@ -55,11 +55,19 @@ python3 echo_plus2.py dump
 
 Keep USB data connected. **Wait until the device search begins.** Then hold **Action** (the button marked with a dot) while supplying power to the Echo. Release it when BootROM is detected. You do not need to hold it during the long capture output.
 
-The command reads the preloader, partition table, and boot images needed for the next step from your Echo. It checks each image and builds the RAM image. This captures only the files needed for the guide, not a full eMMC backup. The command reads eMMC without changing it. It does **not** start Android or provide ADB yet.
+The command reads the preloader, partition table, and active boot images needed for the next step from your Echo. It checks each image and builds the RAM image. This captures only the files needed for the guide, not a full eMMC backup. The command reads eMMC without changing it. It does **not** start Android or provide ADB yet.
 
-If the preloader differs from the supported firmware, `dump` still saves its twice-checked bytes to `local/device/preloader-from-sram.bin`, then stops before accessing eMMC or building a RAM image. If a later image differs, the files read so far remain under `local/device/`, but no RAM image is built.
+The RAM stage reads the active A/B slot and matches its preloader, LK, and boot image to an exact firmware profile. The slot selects the partitions. The image contents select the patch offsets. `NS6536/2509N`, `NS6541/2965N` and `NS65741/8149N` pass offline build checks for either slot, but still need a device boot test. For one of these profiles, use `python3 echo_plus2.py boot --experimental-ram`. If the active slot changes after `dump`, run `dump` again before `boot`.
 
-For another firmware, `python3 echo_plus2.py diagnose` saves a twice-read preloader in a new private `local/device/diagnostic-*/` directory. If the chip, DRAM setup, eMMC geometry, and partition table pass the bounded checks, it also reads LK and boot images for offset analysis. It does not build or install a RAM image. A failed check can still leave the files captured before it stopped.
+**If your firmware is not recognized:**
+
+`dump` stops before building a RAM image and keeps the files it managed to read. To collect both boot slots for analysis, run:
+
+```sh
+python3 echo_plus2.py diagnose
+```
+
+Use the same power and Action-button sequence as for `dump`. `diagnose` saves a checked preloader in `local/device/diagnostic-*/`. If the hardware and partition checks pass, it also reads the LK and boot images from both slots. It only reads the device. These files can be used to work out firmware-specific offsets, but that takes manual reverse engineering. There is no RAM image for that firmware until a matching profile is added. If you get stuck, [open an issue](https://github.com/Tripton/echo-plus-2-root/issues) with your software version and I'll help investigate.
 
 To start the temporary root with the prepared RAM image, disconnect power again, keep USB data connected, and run:
 
@@ -77,7 +85,7 @@ Keep the Echo powered on for stage 2. This temporary access disappears at the ne
 
 ## 2. Keep root after a cold boot
 
-**Stage 2 is specific to the checked `NS6575/8338N` firmware and `boot_a` image.** Its kernel addresses come from that image. The capture and build steps reject different images, and the installed app checks the build fingerprint before attempting the exploit. These checks do not establish compatibility with another firmware. Do not run `persist` on a different build.
+**The tested path is `NS6575/8338N` in slot A.** For `NS6536/2509N`, `NS6541/2965N`, `NS65741/8149N`, or another slot, the installer and kernel targets pass offline checks but have not been run on a device. The installer reads that device's stock system files and checks its build identity, running kernel address, and USB script layout before writing `/data`. A successful experimental RAM boot is not proof of cold-boot root.
 
 To keep root after a normal boot, you need to install the second stage app. It uses CVE-2019-2215 to regain root after a cold boot.
 We use the temporary root session from the previous stage to install a signed app that runs at boot.
@@ -85,6 +93,8 @@ To install the app, run:
 ```sh
 python3 echo_plus2.py persist
 ```
+
+For another exact image or slot, use the same `persist` command after `boot --experimental-ram`. The installer checks the captured image, stock files, system fingerprint, and selected slot before installation. On later boots, the app checks the firmware fingerprint and, for the new profiles, the kernel version before attempting root. If a check fails, inspect the private captures before retrying. Do not substitute offsets from a nearby firmware build.
 
 The first start after a factory reset can take several minutes. Wait for `INSTALL_READY_FOR_COLD_BOOT` before continuing. Keep a backup of `local/device/apk-signing.jks` and `local/device/apk-signing-password.txt`. This installation generates its own signing key; you need the same key to install a later app update without uninstalling it.
 
@@ -108,6 +118,8 @@ The original app allowed only one boot attempt. A stalled boot used it up and le
 
 Root is just the entry point for your own applications.
 In my case I wanted a robust local voice assistant. The Echo's microphone and speaker are excellent, but Alexa is not required. The next section explains how to connect WiFi and optionally install Kiosk Satellite for a local voice assistant.
+
+The guided WiFi gate and Kiosk setup below were tested only on `NS6575/8338N` in slot A. The other exact-image profiles are currently limited to the root stages above.
 
 ### Customize WiFi and Kiosk Satellite
 

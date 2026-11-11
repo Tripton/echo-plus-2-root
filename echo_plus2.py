@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Root the tested Echo Plus 2 using the checked, guided release stages."""
+"""Root an Echo Plus 2 using exact-image, guarded firmware stages."""
 
 import argparse
 import hashlib
@@ -20,6 +20,8 @@ import configure_gate
 
 
 ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / "src/bootstrap"))
+from firmware_profiles import NS6575_8338N, by_name
 # Everything created by this guide stays in one Git-ignored tree. Source and
 # captures can then travel together without adding device data to a commit.
 LOCAL = ROOT / "local"
@@ -32,7 +34,6 @@ MTK_ROOT = LOCAL / "tools/mtkclient"
 # These are compatibility pins for the one measured firmware and upstream
 # tool revision, not user settings. Stop on a mismatch before writing /data.
 MTKCLIENT_COMMIT = "7cb40e727727dfe3faa065eefb29b16ed29bbdf1"
-FINGERPRINT = "Amazon/lidar/lidar:6.0/NS6575/8338N:user/amz-p,release-keys"
 FULL_CAPS = "0000003fffffffff"
 START = time.monotonic()
 
@@ -91,6 +92,17 @@ def state_path(private: Path) -> Path:
 def read_state(private: Path) -> dict[str, str]:
     path = state_path(private)
     return json.loads(path.read_text()) if path.exists() else {}
+
+
+def selected_firmware(state: dict[str, str]):
+    """Resolve the saved exact image and its independent physical slot."""
+    marker = state.get("firmware_profile", "NS6575-8338N a")
+    parts = marker.split()
+    if len(parts) == 1 and parts[0] == NS6575_8338N.name:
+        parts.append("a")  # Private state from the original single-slot guide.
+    if len(parts) != 2 or parts[1] not in ("a", "b"):
+        raise RuntimeError("Saved firmware profile or slot is malformed; rebuild from dump")
+    return by_name(parts[0]), parts[1]
 
 
 def save_state(private: Path, state: dict[str, str]) -> None:
@@ -188,12 +200,17 @@ def prompt_cycle() -> None:
 def dump(args: argparse.Namespace, private: Path, tools: dict[str, object]) -> None:
     state = read_state(private)
     if args.reuse:
-        if not state.get("meid_sha256"):
-            raise RuntimeError("No saved device hash. Run dump without --reuse first")
         phase("Checking the saved device dump")
         call(tools["python"], ROOT / "src/bootstrap/capture.py",
              "--mtkclient-root", tools["mtk"], "--output-dir", private,
              "--verify-captures")
+        if not state.get("meid_sha256"):
+            report = json.loads((private / "capture-report.json").read_text())
+            meid_hash = report.get("meid_sha256", "")
+            if not re.fullmatch(r"[0-9a-f]{64}", meid_hash):
+                raise RuntimeError("Verified capture has no usable device hash")
+            state["meid_sha256"] = meid_hash
+            save_state(private, state)
     else:
         prompt_cycle()
         phase("Reading and checking this Echo's firmware")
@@ -216,12 +233,20 @@ def dump(args: argparse.Namespace, private: Path, tools: dict[str, object]) -> N
     call(tools["python"], ROOT / "src/bootstrap/build.py",
          "--preloader", private / "preloader-from-sram.bin",
          "--lk-a", private / "lk_a.bin", "--lk-b", private / "lk_b.bin",
-         "--boot-a", private / "boot_a-live.bin", "--stage1", tools["stage1"],
+         "--boot-a", private / "boot_a-live.bin",
+         "--boot-b", private / "boot_b-live.bin",
+         "--misc", private / "misc-window.bin", "--stage1", tools["stage1"],
          "--clang", tools["clang"], "--ld", tools["ld"],
          "--objcopy", tools["objcopy"], "--out", BOOT_BUILD)
+    profile = (BOOT_BUILD / "firmware-profile.txt").read_text().strip()
+    state["firmware_profile"] = profile
     state["capture_ready"] = "yes"
     save_state(private, state)
-    print("DUMP_AND_RAM_IMAGE_READY. Next: python3 echo_plus2.py boot", flush=True)
+    if profile != "NS6575-8338N a":
+        print(f"EXPERIMENTAL_RAM_IMAGE_READY: {profile} has passed offline checks but no device boot test", flush=True)
+        print("Next: python3 echo_plus2.py boot --experimental-ram", flush=True)
+    else:
+        print("DUMP_AND_RAM_IMAGE_READY. Next: python3 echo_plus2.py boot", flush=True)
 
 
 def diagnose_firmware(private: Path, tools: dict[str, object]) -> None:
@@ -302,15 +327,24 @@ def save_recovery_file(remote: str, local: Path) -> None:
     print(f"Captured {remote}: {len(result.stdout)} bytes, sha256={sha(local)}", flush=True)
 
 
-def boot(private: Path, tools: dict[str, object], *, resume: bool = False) -> None:
+def boot(private: Path, tools: dict[str, object], *, resume: bool = False,
+         experimental_ram: bool = False) -> None:
     state = read_state(private)
     if state.get("capture_ready") != "yes" or not state.get("meid_sha256"):
         raise RuntimeError("Run python3 echo_plus2.py dump before boot")
+    built_marker = BOOT_BUILD / "firmware-profile.txt"
+    expected_profile = state.get("firmware_profile", "NS6575-8338N")
+    if built_marker.exists() and built_marker.read_text() != expected_profile + "\n":
+        raise RuntimeError("Saved Echo profile differs from the built RAM image; rebuild from its dump")
     phase("Checking the RAM image before touching the Echo")
     runner = [tools["python"], ROOT / "src/bootstrap/run.py",
               "--mtkclient-root", tools["mtk"], "--stage1", tools["stage1"],
               "--target-meid-sha256", state["meid_sha256"],
               "--built-dir", BOOT_BUILD]
+    if expected_profile not in ("NS6575-8338N", "NS6575-8338N a"):
+        if not experimental_ram:
+            raise RuntimeError("This RAM image/slot combination is not device-tested; pass --experimental-ram")
+        runner.append("--allow-experimental-ram")
     call(*runner)
     use_sdk_platform_tools(detect_sdk())
     if resume:
@@ -327,7 +361,10 @@ def boot(private: Path, tools: dict[str, object], *, resume: bool = False) -> No
     if not re.fullmatch(r"[0-9a-f-]{36}", state["recovery_boot_id"]):
         raise RuntimeError("Could not identify this temporary recovery boot")
     save_state(private, state)
-    print("TEMPORARY_ROOT_READY. Next: persist for initial setup, or recover-root to rearm a spent attempt", flush=True)
+    if expected_profile not in ("NS6575-8338N", "NS6575-8338N a"):
+        print("EXPERIMENTAL_RAM_RECOVERY_READY. Next: persist to test cold-boot root", flush=True)
+    else:
+        print("TEMPORARY_ROOT_READY. Next: persist for initial setup, or recover-root to rearm a spent attempt", flush=True)
 
 
 def recover_root(private: Path) -> None:
@@ -392,6 +429,7 @@ def recover_root(private: Path) -> None:
 
 def persist(private: Path, tools: dict[str, object], *, resume_stock: bool = False) -> None:
     state = read_state(private)
+    profile, slot = selected_firmware(state)
     if not state.get("usb_serial") or not state.get("recovery_boot_id"):
         raise RuntimeError("Run python3 echo_plus2.py boot first")
     # Reuse the recovery started by `boot`. A new BootROM cycle would make a
@@ -457,7 +495,8 @@ def persist(private: Path, tools: dict[str, object], *, resume_stock: bool = Fal
     call(tools["python"], ROOT / "src/bootstrap/stock-transition/build.py",
          "--policy", stock / "sepolicy", "--stock-usb-rc", stock / "init.mt8167.usb.rc",
          "--generic-usb-rc", stock / "init.usb.rc", "--clang", tools["clang"],
-         "--ld", tools["ld"], "--policy-cc", tools["ndk_cc"], "--out", STOCK_BUILD)
+         "--ld", tools["ld"], "--policy-cc", tools["ndk_cc"], "--out", STOCK_BUILD,
+         "--profile", profile.name)
     base = [tools["python"], ROOT / "src/bootstrap/stock-transition/install.py",
             "--policy", stock / "sepolicy", "--stock-usb-rc", stock / "init.mt8167.usb.rc",
             "--generic-usb-rc", stock / "init.usb.rc", "--apk", apk,
@@ -466,7 +505,8 @@ def persist(private: Path, tools: dict[str, object], *, resume_stock: bool = Fal
             "--apk-sha256", sha(apk), "--adb-pubkey", public_copy,
             "--aapt", sdk / "build-tools/36.0.0/aapt",
             "--apksigner", sdk / "build-tools/36.0.0/apksigner",
-            "--target-serial", serial]
+            "--target-serial", serial, "--profile", profile.name,
+            "--slot", slot]
     call(*base)
     phase("Installing and arming cold-boot root")
     call(*base, "--resume-stock" if resume_stock else "--run")
@@ -482,6 +522,7 @@ def persist(private: Path, tools: dict[str, object], *, resume_stock: bool = Fal
 def verify(private: Path) -> None:
     use_sdk_platform_tools(detect_sdk())
     state = read_state(private)
+    profile, slot = selected_firmware(state)
     if not all(state.get(key) for key in ("installed_apk_sha256", "usb_serial", "install_boot_id")):
         raise RuntimeError("No completed install is recorded in the private setup state")
     print("Waiting up to 360 seconds for the normally booted Echo over USB ADB...", flush=True)
@@ -528,10 +569,10 @@ def verify(private: Path) -> None:
         time.sleep(2)
     if adb("shell", "cat /proc/sys/kernel/random/boot_id").strip() == state["install_boot_id"]:
         raise RuntimeError("The Echo has not restarted since installation")
-    if adb("shell", "getprop ro.build.fingerprint").strip() != FINGERPRINT:
+    if adb("shell", "getprop ro.build.fingerprint").strip() != profile.fingerprint:
         raise RuntimeError("Stock firmware differs from the supported build")
-    if adb("shell", "getprop ro.boot.slot_suffix").strip() != "_a":
-        raise RuntimeError("Stock Android is not running the checked boot_a slot")
+    if adb("shell", "getprop ro.boot.slot_suffix").strip() != "_" + slot:
+        raise RuntimeError("Stock Android is not running the selected boot slot")
     # USB ADB can appear before Android finishes starting. A check launched as
     # soon as the cable reconnects should wait for the completed stock boot.
     deadline = time.monotonic() + 180
@@ -577,19 +618,22 @@ def verify(private: Path) -> None:
             f"CapBnd:\t{FULL_CAPS}" not in capabilities or
             "BRIDGE_EXIT=0" not in capabilities):
         raise RuntimeError("The current-boot root helper lacks UID 0 or full capabilities")
-    print("COLD_BOOT_ROOT_OBSERVED on the tested stock firmware", flush=True)
+    print(f"COLD_BOOT_ROOT_OBSERVED on {profile.name} slot {slot.upper()}", flush=True)
 
 
 def verify_usb_identity(private: Path) -> None:
     """Check the selected stock Echo without needing the short-lived root broker."""
-    serial = read_state(private).get("usb_serial")
+    state = read_state(private)
+    profile, slot = selected_firmware(state)
+    serial = state.get("usb_serial")
     if not serial:
         raise RuntimeError("No installed Echo is recorded in local/device")
     if (adb("get-state").strip() != "device" or
             adb("get-serialno").strip() != serial or
             adb("shell", "getprop", "ro.serialno").strip() != serial or
             adb("shell", "getprop", "ro.boot.hardware").strip() != "mt8167" or
-            adb("shell", "getprop", "ro.build.fingerprint").strip() != FINGERPRINT):
+            adb("shell", "getprop", "ro.build.fingerprint").strip() != profile.fingerprint or
+            adb("shell", "getprop", "ro.boot.slot_suffix").strip() != "_" + slot):
         raise RuntimeError("USB ADB does not identify as the installed Echo Plus 2")
 
 
@@ -607,6 +651,8 @@ def main() -> None:
     boot_parser = commands.add_parser("boot", help="boot temporary root from RAM")
     boot_parser.add_argument("--resume", action="store_true",
                              help="adopt the current USB recovery after an interrupted boot command")
+    boot_parser.add_argument("--experimental-ram", action="store_true",
+                             help="allow an offline-checked but not device-tested RAM image")
     commands.add_parser("recover-root", help="back up and rearm one cold-boot root attempt from USB RAM recovery")
     persist_parser = commands.add_parser("persist", help="install cold-boot root from the running temporary recovery")
     persist_parser.add_argument("--resume-stock", action="store_true",
@@ -648,6 +694,8 @@ def main() -> None:
         recover_root(private)
         return
     if args.stage in {"configure", "gate-status"}:
+        if selected_firmware(read_state(private)) != (NS6575_8338N, "a"):
+            raise RuntimeError("The optional WiFi gate is device-tested only on NS6575/8338N slot A")
         sdk = detect_sdk()
         use_sdk_platform_tools(sdk)
         if args.stage == "configure":
@@ -668,7 +716,8 @@ def main() -> None:
     elif args.stage == "diagnose":
         diagnose_firmware(private, tools)
     elif args.stage == "boot":
-        boot(private, tools, resume=args.resume)
+        boot(private, tools, resume=args.resume,
+             experimental_ram=args.experimental_ram)
     elif args.stage == "persist":
         persist(private, tools, resume_stock=args.resume_stock)
 

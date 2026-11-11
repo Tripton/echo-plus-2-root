@@ -7,14 +7,13 @@ recovery from ../run.py, writes ordinary files in /data, then continues into
 signed stock Android and registers the self-signed app with Package Manager.
 It never issues raw eMMC read, write or erase commands.
 
-This source completed an installation and cold-boot root check on the tested
-unit on 2 November 2026. Two host-side checks were corrected during that run
-and completed using checked resume commands. A wholly uninterrupted pass
-through the final guide remains to be tested.
+The NS6575/8338N slot-A path completed an installation and cold-boot root
+check on 2 November 2026. Other exact-image paths need device validation.
 """
 
 import argparse
 import hashlib
+import json
 import re
 import shutil
 import subprocess
@@ -22,14 +21,22 @@ import tempfile
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
+import sys
 
-from build import INPUTS, OUTPUTS, POLICY_LOADER_RUNTIME_SHA256, policy_runtime_sha256
+from build import (INPUTS, NS65741_8149N_INPUTS, OUTPUTS,
+                   POLICY_LOADER_RUNTIME_SHA256,
+                   NS65741_8149N_POLICY_LOADER_RUNTIME_SHA256,
+                   check_captured, patch_mtp_usb, policy_runtime_sha256,
+                   replace_once, TCP_ADB_ON, TCP_ADB_OFF,
+                   USB_DISABLE_TRIGGER, USB_INERT_TRIGGER)
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from firmware_profiles import NS65741_8149N, NS6575_8338N, by_name
 
 
 ROOT = Path(__file__).resolve().parent
 PERSISTENCE = ROOT.parents[1] / "persistence"
 PACKAGE = "org.local.lidar.binderprobe"
-FINGERPRINT = "Amazon/lidar/lidar:6.0/NS6575/8338N:user/amz-p,release-keys"
 PROMPT = b"android:/ # "
 TOYBOX = "/system_root/system/bin/toybox"
 REMOTE = {
@@ -90,20 +97,62 @@ def adb_usb_serial(args: argparse.Namespace) -> str:
 
 def local_preflight(args: argparse.Namespace) -> dict[str, bytes]:
     """1. Check the exact image and every file to be sent to the device."""
+    profile = by_name(args.profile)
+    exact_inputs = (INPUTS if profile == NS6575_8338N else
+                    NS65741_8149N_INPUTS if profile == NS65741_8149N else None)
+    expected_runtime = (POLICY_LOADER_RUNTIME_SHA256 if profile == NS6575_8338N else
+                        NS65741_8149N_POLICY_LOADER_RUNTIME_SHA256
+                        if profile == NS65741_8149N else None)
+    manifest = json.loads((args.built_dir / "manifest.json").read_text())
+    if manifest.get("profile") != profile.name or set(manifest) != {
+            "profile", "inputs", "outputs", "policy_loader_runtime"}:
+        raise RuntimeError("stock transition manifest has another profile or layout")
+    input_paths = {"policy": args.policy, "stock_usb_rc": args.stock_usb_rc,
+                   "generic_usb_rc": args.generic_usb_rc}
+    for name, path in input_paths.items():
+        if exact_inputs is None:
+            check_captured(path.read_bytes(), name)
+        if digest(path.read_bytes()) != manifest["inputs"].get(name):
+            raise RuntimeError(f"stock transition input differs from its build: {name}")
+    if exact_inputs is None:
+        safe = patch_mtp_usb(replace_once(args.stock_usb_rc.read_bytes(),
+                                          TCP_ADB_ON, TCP_ADB_OFF, "stock TCP ADB"))
+        preserve = replace_once(args.generic_usb_rc.read_bytes(),
+                                USB_DISABLE_TRIGGER, USB_INERT_TRIGGER,
+                                "generic USB disable trigger")
+        if ((args.built_dir / "safe-usb.rc").read_bytes() != safe or
+                (args.built_dir / "preserve-usb.rc").read_bytes() != preserve):
+            raise RuntimeError("captured USB edits differ from the built RAM copies")
     files = {
-        "policy": checked_file(args.policy, *INPUTS["policy"]),
-        "stock_usb": checked_file(args.stock_usb_rc, *INPUTS["stock_usb_rc"]),
-        "generic_usb": checked_file(args.generic_usb_rc, *INPUTS["generic_usb_rc"]),
-        "safe_usb": checked_file(args.built_dir / "safe-usb.rc", *OUTPUTS["safe-usb.rc"]),
-        "preserve_usb": checked_file(args.built_dir / "preserve-usb.rc", *OUTPUTS["preserve-usb.rc"]),
+        "policy": (checked_file(args.policy, *exact_inputs["policy"])
+                   if exact_inputs else args.policy.read_bytes()),
+        "stock_usb": (checked_file(args.stock_usb_rc, *exact_inputs["stock_usb_rc"])
+                      if exact_inputs else args.stock_usb_rc.read_bytes()),
+        "generic_usb": (checked_file(args.generic_usb_rc, *exact_inputs["generic_usb_rc"])
+                        if exact_inputs else args.generic_usb_rc.read_bytes()),
+        "safe_usb": (checked_file(args.built_dir / "safe-usb.rc", *OUTPUTS["safe-usb.rc"])
+                     if exact_inputs else (args.built_dir / "safe-usb.rc").read_bytes()),
+        "preserve_usb": (checked_file(args.built_dir / "preserve-usb.rc", *OUTPUTS["preserve-usb.rc"])
+                         if exact_inputs else (args.built_dir / "preserve-usb.rc").read_bytes()),
         "switchroot": checked_file(args.built_dir / "switchroot.elf", *OUTPUTS["switchroot.elf"]),
         "helper": checked_file(args.helper, args.helper.stat().st_size, args.helper_sha256),
         "apk": checked_file(args.apk, args.apk.stat().st_size, args.apk_sha256),
     }
     loader = (args.built_dir / "policy-loader.elf").read_bytes()
-    if policy_runtime_sha256(loader) != POLICY_LOADER_RUNTIME_SHA256:
-        raise RuntimeError("policy loader runtime image differs from the tested ELF")
+    if policy_runtime_sha256(loader) != manifest["policy_loader_runtime"] or (
+            expected_runtime is not None and
+            policy_runtime_sha256(loader) != expected_runtime):
+        raise RuntimeError("policy loader runtime image differs from its checked build")
     files["policy_loader"] = loader
+    if (set(manifest["inputs"]) != set(input_paths) or
+            set(manifest["outputs"]) != {"policy-loader.elf", "switchroot.elf",
+                                         "safe-usb.rc", "preserve-usb.rc"} or
+            any(digest(files[name]) != manifest["outputs"][filename]
+                for filename, name in (("policy-loader.elf", "policy_loader"),
+                                       ("switchroot.elf", "switchroot"),
+                                       ("safe-usb.rc", "safe_usb"),
+                                       ("preserve-usb.rc", "preserve_usb")))):
+        raise RuntimeError("stock transition manifest differs from its files")
     key = args.adb_pubkey.read_bytes()
     if not (200 <= len(key) <= 8192 and key.isascii() and
             b"\x00" not in key and len(key.splitlines()) == 1):
@@ -113,7 +162,7 @@ def local_preflight(args: argparse.Namespace) -> dict[str, bytes]:
     badging = command([str(args.aapt), "dump", "badging", str(args.apk)])
     if not re.search(r"^package: name='org\.local\.lidar\.binderprobe' versionCode='1' versionName='1\.0\.0'", badging, re.M):
         raise RuntimeError("signed APK package or version differs")
-    print("PREFLIGHT_INSTALL_INPUTS_OK: exact 8338N files and signed app", flush=True)
+    print(f"PREFLIGHT_INSTALL_INPUTS_OK: {profile.name} slot {args.slot.upper()} and signed app", flush=True)
     return files
 
 
@@ -150,6 +199,21 @@ def verify_recovery(args: argparse.Namespace, files: dict[str, bytes]):
                           ("/system_root/init.usb.rc", "generic_usb")):
         if adb_bytes(args, "exec-out", "cat", remote) != files[local]:
             raise RuntimeError(f"live stock input differs: {remote}")
+    profile = by_name(args.profile)
+    if (profile, args.slot) != (NS6575_8338N, "a"):
+        fingerprints = []
+        for path in ("/system_root/system/build.prop", "/system_root/build.prop"):
+            try:
+                properties = adb_bytes(args, "exec-out", "cat", path, timeout=10)
+            except RuntimeError:
+                continue
+            fingerprints.extend(re.findall(rb"(?m)^ro\.build\.fingerprint=(.+)$", properties))
+        if not fingerprints or set(fingerprints) != {profile.fingerprint.encode("ascii")}:
+            raise RuntimeError("mounted stock system fingerprint is not the selected boot image")
+        symbols = adb_bytes(args, "exec-out", "cat", "/proc/kallsyms", timeout=20)
+        matches = re.findall(rb"(?m)^([0-9a-f]{16}) [tT] sel_read_enforce$", symbols)
+        if matches != [f"{profile.sel_read_enforce:016x}".encode("ascii")]:
+            raise RuntimeError("running kernel address differs from the selected image")
     ports = [p for p in list_ports.comports() if (p.vid, p.pid) == (0x0E8D, 0x2007)]
     if len(ports) != 1:
         raise RuntimeError("expected exactly one Plus 2 recovery serial port")
@@ -162,7 +226,9 @@ def verify_recovery(args: argparse.Namespace, files: dict[str, bytes]):
         if "CapEff:\t0000003fffffffff" not in serial_command(port, "cat /proc/1/status"):
             raise RuntimeError("temporary PID 1 lacks the tested capabilities")
         mounts = serial_command(port, "cat /proc/mounts")
-        if "/dev/mmcblk0p13 /system_root ext4 ro," not in mounts or "norecovery" not in mounts:
+        system_partition = 13 if args.slot == "a" else 14
+        if (f"/dev/mmcblk0p{system_partition} /system_root ext4 ro," not in mounts or
+                "norecovery" not in mounts):
             raise RuntimeError("read-only stock system mount differs")
         if " /data " in mounts:
             raise RuntimeError("userdata was unexpectedly mounted before staging")
@@ -192,18 +258,18 @@ def upload_recovery_files(args: argparse.Namespace, files: dict[str, bytes]) -> 
     print("CHECKPOINT_INSTALL_VOLATILE_UPLOADS_OK", flush=True)
 
 
-def load_stock_policy(port) -> None:
+def load_stock_policy(port, policy_size: int, *, force: bool = False) -> None:
     """4. Restore the checked stock policy in recovery RAM before /data."""
     mounts = serial_command(port, "cat /proc/mounts")
     if "selinuxfs /sys/fs/selinux selinuxfs" not in mounts:
         serial_checked(port, "mount -t selinuxfs selinuxfs /sys/fs/selinux", "SELINUX_MOUNT")
-    policy_size = serial_command(port, "cat /sys/fs/selinux/policy | wc -c")
-    if not re.search(r"\b363124\b", policy_size):
+    loaded_size = serial_command(port, "cat /sys/fs/selinux/policy | wc -c")
+    if force or not re.search(rf"\b{policy_size}\b", loaded_size):
         serial_checked(port, f"chmod 0700 {REMOTE['policy_loader']}", "POLICY_CHMOD")
         result = serial_checked(port, REMOTE["policy_loader"], "POLICY_LOAD")
-        if "POLICY_LOAD_SINGLE_WRITE_OK bytes=363124" not in result:
+        if f"POLICY_LOAD_SINGLE_WRITE_OK bytes={policy_size}" not in result:
             raise RuntimeError("stock policy loader did not confirm one write")
-    if not re.search(r"\b363124\b", serial_command(port, "cat /sys/fs/selinux/policy | wc -c")):
+    if not re.search(rf"\b{policy_size}\b", serial_command(port, "cat /sys/fs/selinux/policy | wc -c")):
         raise RuntimeError("loaded stock policy size differs")
     if not re.search(r"(?:^|\n)0\n", serial_command(port, "cat /sys/fs/selinux/enforce; echo")):
         raise RuntimeError("recovery policy is not permissive")
@@ -358,10 +424,11 @@ def wait_for_stock(args: argparse.Namespace) -> None:
         time.sleep(2)
     else:
         raise RuntimeError("stock Android Package Manager did not become ready")
-    if adb(args, "shell", "getprop", "ro.build.fingerprint") != FINGERPRINT:
+    profile = by_name(args.profile)
+    if adb(args, "shell", "getprop", "ro.build.fingerprint") != profile.fingerprint:
         raise RuntimeError("stock Android fingerprint differs from the checked build")
-    if adb(args, "shell", "getprop", "ro.boot.slot_suffix") != "_a":
-        raise RuntimeError("stock Android is not running the checked boot_a slot")
+    if adb(args, "shell", "getprop", "ro.boot.slot_suffix") != "_" + args.slot:
+        raise RuntimeError("stock Android is not running the selected boot slot")
     print("CHECKPOINT_INSTALL_SIGNED_STOCK_AND_PM_OK", flush=True)
 
 
@@ -525,6 +592,8 @@ def main() -> None:
     parser.add_argument("--aapt", default=shutil.which("aapt") or "aapt")
     parser.add_argument("--apksigner", default=shutil.which("apksigner") or "apksigner")
     parser.add_argument("--target-serial", help="private expected USB serial; needed only with --run")
+    parser.add_argument("--profile", required=True, help="selected exact boot-image profile")
+    parser.add_argument("--slot", choices=("a", "b"), required=True)
     parser.add_argument("--run", action="store_true", help="perform persistent /data installation")
     parser.add_argument("--resume-stock", action="store_true",
                         help="finish app installation after a checked stock-init handoff")
@@ -545,7 +614,8 @@ def main() -> None:
         port = verify_recovery(args, files)
         try:
             upload_recovery_files(args, files)
-            load_stock_policy(port)
+            load_stock_policy(port, len(files["policy"]),
+                              force=by_name(args.profile) != NS6575_8338N)
             stage_userdata(args, port, files)
             continue_stock_android(args, port, files)
         finally:
