@@ -8,6 +8,7 @@ The later stock-init transition and APK installation are separate steps.
 """
 
 import argparse
+import gzip
 import hashlib
 import logging
 import re
@@ -16,7 +17,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from build import OUTPUTS_BY_PROFILE_SLOT, PINNED, SOURCE, align, sha
+from build import (OUTPUTS_BY_PROFILE_SLOT, PINNED, SOURCE, align,
+                   check_init_elf, check_layout, cpio_entries, sha)
 from firmware_profiles import NS6575_8338N, by_name
 
 
@@ -57,8 +59,9 @@ def preflight(args: argparse.Namespace) -> list[tuple[int, bytes, str]]:
     if not args.stage1.resolve().is_relative_to(args.mtkclient_root.resolve()):
         raise ValueError("Stage-1 file must belong to the checked MTKClient clone")
 
-    # 2. Confirm every offline-generated file, even the two that are embedded
-    # inside the handoff image. No firmware dump is read by this launcher.
+    # 2. Confirm the fixed low-level patches and validate the compiler-built
+    # init, archive and FDT shim against their actual format and memory bounds.
+    # No firmware dump is read by this launcher.
     marker_path = args.built_dir / "firmware-profile.txt"
     if marker_path.exists():
         marker = marker_path.read_text()
@@ -75,14 +78,22 @@ def preflight(args: argparse.Namespace) -> list[tuple[int, bytes, str]]:
         profile = by_name(parts[0])
         slot = parts[1]
     else:
-        # Older, already-built 8338N directories have no marker. Their exact
-        # payload hashes below still identify the sole tested profile.
+        # Older, already-built 8338N directories have no marker.
         profile = by_name("NS6575-8338N")
         slot = "a"
     payload = {name: checked_file(args.built_dir / name, *expected)
                for name, expected in OUTPUTS_BY_PROFILE_SLOT[profile.name, slot].items()}
-    if payload["fdt_initrd.bin"][1024:1024 + 2038] != payload["initramfs_overlay.cpio.gz"]:
-        raise ValueError("embedded initramfs overlay differs")
+    for name in ("init.elf", "initramfs_overlay.cpio.gz", "fdt_initrd.bin"):
+        payload[name] = (args.built_dir / name).read_bytes()
+    check_init_elf(payload["init.elf"])
+    archive = payload["initramfs_overlay.cpio.gz"]
+    if not 0 < len(archive) <= 2048 or archive[:3] != b"\x1f\x8b\x08":
+        raise ValueError("bootstrap initramfs size or gzip header changed")
+    if cpio_entries(gzip.decompress(archive)) != {
+            "init": payload["init.elf"], "sbin": b"",
+            "sbin/multi_init": b"../init"}:
+        raise ValueError("bootstrap initramfs members differ")
+    check_layout(payload, profile, slot)
     stages = []
     for address, name in STAGE_ADDRESSES:
         data = payload[name]
@@ -95,7 +106,7 @@ def preflight(args: argparse.Namespace) -> list[tuple[int, bytes, str]]:
     for (address, data, name), (next_address, _, _) in zip(stages, stages[1:]):
         if address + align(len(data), 512) > next_address:
             raise ValueError(f"SRAM staging overlap after {name}")
-    print(f"PREFLIGHT_BOOTSTRAP_RUN_OK: {profile.name} slot {slot.upper()} pinned payloads and SRAM layout", flush=True)
+    print(f"PREFLIGHT_BOOTSTRAP_RUN_OK: {profile.name} slot {slot.upper()} validated payloads and SRAM layout", flush=True)
     return stages
 
 

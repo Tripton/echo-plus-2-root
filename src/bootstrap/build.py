@@ -30,54 +30,36 @@ PINNED = {
     "stage1": (1000, "0cec003fb8b594ed374270debc0aefb198d03d66d0f4ef3db5d5f1e706098296"),
 }
 NS6575_8338N_SLOT_A_OUTPUTS = {
-    "init.elf": (7952, "566dc3cdda18538c39de2d5c53ab2bc13a9923f7b6595db9c8928b4a0e6c50fb"),
-    "initramfs_overlay.cpio.gz": (2038, "1d1bb4544782f7bfb200f5c13230a85d92d22844f698b6faef6b3acd7e2bb6d1"),
     "preloader_snapshot.bin": (184, "5e2d0711bff088738fb00935c71dd3dfa80009305cf6b12bfc5fce6a63b401c9"),
     "lk_bridge.bin": (232, "5954b8fdb2e6e2083efa17124336026f407e5ad7ac7c150c0458038cc8b6e487"),
     "handoff_cave.bin": (128, "a35e334735dfa1b566b418e18ae3c513626068dd099ce2ee048a8e4ca1074392"),
-    "fdt_initrd.bin": (3064, "51e443fc6e0b2bb11cbf96e0db86931c7505e4a46abe96ec47dc69c15ea7d905"),
     "preloader_patched.bin": (145716, "1fd3baa00bb9a951ca3f7e5ef3a6ec4ac6d4c46696c190840814d0c04a1561c1"),
 }
 NS6541_2965N_SLOT_B_OUTPUTS = {
-    "init.elf": (7952, "4a2cb0ad5f7dada8beb1d719752f13705c1ff5f30e460a064b3dfe9c5cf63beb"),
-    "initramfs_overlay.cpio.gz": (2038, "6534cb9870c8e8aaacad33dde759313b6b04cb8f3854df9da02618f9bcc80d9e"),
     "preloader_snapshot.bin": NS6575_8338N_SLOT_A_OUTPUTS["preloader_snapshot.bin"],
     "lk_bridge.bin": (244, "ac140e67c858d6ab496b4d1b99374bf40a2e68f818bca905012340fd3422efcc"),
     "handoff_cave.bin": (128, "4601f9cca2c7e15b5b73d4416159532c6c5e5dec3669458ef59bd995392e85c0"),
-    "fdt_initrd.bin": (3064, "85d55ab4be2fb3f5b0dd19f543cab4d99094a315270fb681079706855eb2a26e"),
     "preloader_patched.bin": (144004, "49be3ad8968ecb37c2180c06e31238e8b726b0afe6caeece0058ae395749a297"),
 }
 NS6575_8338N_SLOT_B_OUTPUTS = {
     **NS6575_8338N_SLOT_A_OUTPUTS,
-    "init.elf": (7952, "abf9f8329a2970d24e2e1d1ef22c6d67bf731c116c88259301b8eab86da60ac1"),
-    "initramfs_overlay.cpio.gz": (2038, "44c36b8f741c4aee6f5a26e5b2992decb13182c416cb4f44d42919f0b4904362"),
-    "fdt_initrd.bin": (3064, "6d930e5c40f726ea56f75232915999f232a1e889acd5cb7474138a35c1aa8735"),
 }
 NS65741_8149N_SLOT_A_OUTPUTS = {
     **NS6575_8338N_SLOT_A_OUTPUTS,
-    "fdt_initrd.bin": (3064, "19ea567ecf1a239e3f28e0dd9c9d3a6436fb300a656786dc35468e150b19fed6"),
 }
 NS65741_8149N_SLOT_B_OUTPUTS = {
     **NS6575_8338N_SLOT_B_OUTPUTS,
-    "fdt_initrd.bin": (3064, "4f250d6106685409617f4aec20fb0e2c061ea06d2f1688451ed91af9e3dc03e6"),
 }
 NS6536_2509N_SLOT_A_OUTPUTS = {
     **NS6541_2965N_SLOT_B_OUTPUTS,
-    "init.elf": (7952, "b49f058b56ae960b2bdf3395d1e307d681716e336508ca1feb35d990c51fde02"),
-    "initramfs_overlay.cpio.gz": (2038, "505cafb9d2b17a057cc2b1c5b2df7187d5e6dac679eb01cb17842ec608a4cb5f"),
     "lk_bridge.bin": (244, "0f6b75770a23d97f23258edf1ce60f8ff69af00ae02fbb57b3a8bbecb37af043"),
-    "fdt_initrd.bin": (3064, "ba6e2379cd527b4b855ad1dc7da624331e84d1245666131b39f5fccd3eee607b"),
 }
 NS6536_2509N_SLOT_B_OUTPUTS = {
     **NS6541_2965N_SLOT_B_OUTPUTS,
     "lk_bridge.bin": NS6536_2509N_SLOT_A_OUTPUTS["lk_bridge.bin"],
-    "fdt_initrd.bin": (3064, "7f65aec46f972e1b869985749ed501218da1c3ba605656dc5acdf0fefb51bf7d"),
 }
 NS6541_2965N_SLOT_A_OUTPUTS = {
     **NS6541_2965N_SLOT_B_OUTPUTS,
-    "init.elf": NS6536_2509N_SLOT_A_OUTPUTS["init.elf"],
-    "initramfs_overlay.cpio.gz": NS6536_2509N_SLOT_A_OUTPUTS["initramfs_overlay.cpio.gz"],
-    "fdt_initrd.bin": (3064, "5a2b132b95ab3b1cd404ea3dbc0f3346379decaaa39035af5cd2f62bdd5cef83"),
 }
 OUTPUTS_BY_PROFILE_SLOT = {
     (NS6575_8338N.name, "a"): NS6575_8338N_SLOT_A_OUTPUTS,
@@ -182,6 +164,25 @@ def build_init(temp: Path, clang: str, ld: str, source: Path = SOURCE) -> bytes:
     return image_file.read_bytes()
 
 
+def check_init_elf(data: bytes) -> None:
+    """Check the one bounded AArch64 segment loaded by the initramfs."""
+    if len(data) < 120 or data[:7] != b"\x7fELF\x02\x01\x01":
+        raise ValueError("bootstrap init is not a little-endian ELF64 image")
+    header = struct.unpack_from("<HHIQQQIHHHHHH", data, 16)
+    elf_type, machine, version, entry, phoff, _, flags, ehsize, phentsize, phnum, _, _, _ = header
+    if (elf_type != 2 or machine != 183 or version != 1 or entry != 0x10000 or
+            flags != 0 or ehsize != 64 or phentsize != 56 or phnum != 1 or
+            phoff + phentsize > len(data)):
+        raise ValueError("bootstrap init ELF header or entry changed")
+    segment = struct.unpack_from("<IIQQQQQQ", data, phoff)
+    kind, permissions, offset, virtual, physical, file_size, memory_size, alignment = segment
+    if (kind != 1 or permissions != 5 or offset != 0x1000 or
+            virtual != 0x10000 or physical != virtual or
+            not 0 < file_size <= 0x2000 or memory_size != file_size or
+            alignment != 0x1000 or offset + file_size > len(data)):
+        raise ValueError("bootstrap init load segment changed or exceeds its bound")
+
+
 def build_assembly(temp: Path, name: str, target: str, address: int,
                    clang: str, ld: str, objcopy: str, source: Path = SOURCE) -> bytes:
     object_file = temp / f"{name}.o"
@@ -239,6 +240,10 @@ def check_lk(lk: bytes, profile: FirmwareProfile = NS6575_8338N) -> None:
 
 def check_layout(payload: dict[str, bytes], profile: FirmwareProfile = NS6575_8338N,
                  slot: str = "a") -> None:
+    image = payload["fdt_initrd.bin"]
+    archive = payload["initramfs_overlay.cpio.gz"]
+    if len(image) > 3072 or not 0 < len(archive) <= 2048:
+        raise ValueError("FDT shim or compressed initramfs exceeds the 3072-byte LK cave")
     regions = (
         (0x201000, payload["preloader_patched.bin"]),
         (0x226000, payload["lk_bridge.bin"]),
@@ -251,14 +256,12 @@ def check_layout(payload: dict[str, bytes], profile: FirmwareProfile = NS6575_83
         if padded_end > 0x238000 or (index + 1 < len(regions) and
                                       padded_end > regions[index + 1][0]):
             raise ValueError(f"SRAM staging overlap at 0x{address:x}")
-    image = payload["fdt_initrd.bin"]
-    archive = payload["initramfs_overlay.cpio.gz"]
+    end = profile.archive_address + len(archive) - 0x44000000
     if ((profile == NS6575_8338N and slot == "a" and image[984:1024] != bytes(40)) or
             image[1024:1024 + len(archive)] != archive or
             image.count(archive) != 1 or
-            image.count(f"initrd=0x44000000,0x{profile.initrd_end - 0x44000000:x} panic=1 ".encode()) != 1 or
-            profile.archive_address + len(archive) != profile.initrd_end):
-        raise ValueError("embedded archive or fixed FDT replacement changed")
+            image.count(f"initrd=0x44000000,0x{end:x} panic=1 ".encode()) != 1):
+        raise ValueError("embedded archive or FDT replacement changed")
 
 
 def replace_once(text: str, old: str, new: str, expected: int = 1) -> str:
@@ -270,7 +273,7 @@ def replace_once(text: str, old: str, new: str, expected: int = 1) -> str:
 def variant_sources(temp: Path, profile: FirmwareProfile, slot: str,
                     archive_length: int) -> Path:
     """Generate an isolated image/slot variant without changing tested source."""
-    if profile == NS6575_8338N and slot == "a":
+    if profile == NS6575_8338N and slot == "a" and archive_length == 2038:
         return SOURCE
     source = temp / "variant_sources"
     source.mkdir(exist_ok=True)
@@ -314,9 +317,9 @@ def variant_sources(temp: Path, profile: FirmwareProfile, slot: str,
     (source / "preloader_snapshot.S").write_bytes((SOURCE / "preloader_snapshot.S").read_bytes())
 
     fdt = (SOURCE / "fdt_initrd.S").read_text()
-    if profile != NS6575_8338N:
+    if profile != NS6575_8338N or archive_length != 2038:
         address = profile.archive_address
-        end = profile.initrd_end - 0x44000000
+        end = profile.archive_address + archive_length - 0x44000000
         fdt = replace_once(fdt, "#0x443e", f"#0x{address >> 16:04x}", 2)
         fdt = replace_once(fdt, "#0xd7eb", f"#0x{address & 0xffff:04x}", 2)
         fdt = replace_once(fdt, "#2038", f"#{archive_length}", 2)
@@ -337,7 +340,7 @@ def variant_sources(temp: Path, profile: FirmwareProfile, slot: str,
             "    movz x20, #0x41e3, lsl #16\n"
             "    movk x20, #0x2400",
         )
-        end = profile.initrd_end - 0x44000000
+        end = profile.archive_address + archive_length - 0x44000000
         replacement = f"replacement:\n    .ascii \"initrd=0x44000000,0x{end:x} panic=1 \""
         fdt = replace_once(
             fdt, replacement,
@@ -386,25 +389,29 @@ def build(args: argparse.Namespace) -> None:
     with tempfile.TemporaryDirectory() as folder:
         temp = Path(folder)
         source = variant_sources(temp, profile, slot, 2038)
-        elf = check_output(build_init(temp, args.clang, args.ld, source), "init.elf", profile, slot)
+        elf = build_init(temp, args.clang, args.ld, source)
+        check_init_elf(elf)
+        print(f"BUILD_LAYOUT_OK init.elf bytes={len(elf)} sha256={sha(elf)}")
         archive = gzip.compress(
             newc_entry("init", elf, 0o100755, 270) +
             newc_entry("sbin", b"", 0o040755, 271) +
             newc_entry("sbin/multi_init", b"../init", 0o120777, 272) +
             newc_entry("TRAILER!!!", b"", 0, 273), compresslevel=9, mtime=0)
         # zlib versions disagree about the GZIP OS byte. Use the portable
-        # value so the pinned payload is identical on supported Python builds.
+        # value so this header is stable across supported Python builds.
         if archive[:3] != b"\x1f\x8b\x08" or archive[4:8] != b"\x00" * 4:
             raise RuntimeError("unexpected GZIP header")
         archive = archive[:9] + b"\xff" + archive[10:]
+        if len(archive) > 2048:
+            raise ValueError("compressed initramfs exceeds the 2048-byte FDT payload space")
         payload["init.elf"] = elf
-        payload["initramfs_overlay.cpio.gz"] = check_output(archive, "initramfs_overlay.cpio.gz", profile, slot)
+        payload["initramfs_overlay.cpio.gz"] = archive
+        print(f"BUILD_LAYOUT_OK initramfs_overlay.cpio.gz bytes={len(archive)} sha256={sha(archive)}")
         after = cpio_entries(gzip.decompress(stock_ramdisk + archive))
         if after != {**stock_files, "init": elf, "sbin/multi_init": b"../init"}:
             raise ValueError("overlay changes another stock initramfs member")
         (temp / "initramfs_overlay.cpio.gz").write_bytes(archive)
-        if profile != NS6575_8338N:
-            source = variant_sources(temp, profile, slot, len(archive))
+        source = variant_sources(temp, profile, slot, len(archive))
         for name, target, address in (
             ("preloader_snapshot", "armv7a-none-eabi", 0x227000),
             ("lk_bridge", "armv7a-none-eabi", 0x226000),
@@ -412,9 +419,13 @@ def build(args: argparse.Namespace) -> None:
             ("fdt_initrd", "aarch64-none-elf", 0x41E32000),
         ):
             binary_name = name + ".bin"
-            payload[binary_name] = check_output(
-                build_assembly(temp, name, target, address,
-                               args.clang, args.ld, args.objcopy, source), binary_name, profile, slot)
+            binary = build_assembly(temp, name, target, address,
+                                    args.clang, args.ld, args.objcopy, source)
+            if name == "fdt_initrd":
+                payload[binary_name] = binary
+                print(f"BUILD_LAYOUT_OK {binary_name} bytes={len(binary)} sha256={sha(binary)}")
+            else:
+                payload[binary_name] = check_output(binary, binary_name, profile, slot)
     payload["preloader_patched.bin"] = patch_preloader(preloader, profile, slot)
     check_layout(payload, profile, slot)
     print(f"OFFLINE_BOOTSTRAP_PREFLIGHT_OK: checked {profile.name} slot {slot.upper()} RAM image")
