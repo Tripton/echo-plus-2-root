@@ -153,14 +153,20 @@ def run(command: list[str], *, cwd: Path | None = None) -> None:
     subprocess.run(command, check=True, cwd=cwd)
 
 
-def build_init(temp: Path, clang: str, ld: str, source: Path = SOURCE) -> bytes:
+def build_init(temp: Path, clang: str, ld: str, objcopy: str,
+               source: Path = SOURCE) -> bytes:
     object_file = temp / "init.o"
+    linked_file = temp / "init.linked.elf"
     image_file = temp / "init.elf"
     run([clang, "-target", "aarch64-none-elf", "-Oz", "-ffreestanding",
          "-fno-builtin", "-fno-stack-protector", "-fno-asynchronous-unwind-tables",
          "-nostdlib", "-c", str(source / "init.c"), "-o", str(object_file)])
     run([ld, "-T", str(SOURCE / "init.ld"), "-z", "max-page-size=0x1000",
-         "--strip-all", "-o", str(image_file), str(object_file)])
+         "--strip-all", "-o", str(linked_file), str(object_file)])
+    # The kernel's ELF loader uses program headers, not section headers.
+    # Keep only the loadable image so host toolchain metadata does not consume
+    # the fixed-size compressed initramfs space in LK.
+    run([objcopy, "--strip-sections", str(linked_file), str(image_file)])
     return image_file.read_bytes()
 
 
@@ -169,9 +175,11 @@ def check_init_elf(data: bytes) -> None:
     if len(data) < 120 or data[:7] != b"\x7fELF\x02\x01\x01":
         raise ValueError("bootstrap init is not a little-endian ELF64 image")
     header = struct.unpack_from("<HHIQQQIHHHHHH", data, 16)
-    elf_type, machine, version, entry, phoff, _, flags, ehsize, phentsize, phnum, _, _, _ = header
+    (elf_type, machine, version, entry, phoff, shoff, flags, ehsize,
+     phentsize, phnum, shentsize, shnum, shstrndx) = header
     if (elf_type != 2 or machine != 183 or version != 1 or entry != 0x10000 or
             flags != 0 or ehsize != 64 or phentsize != 56 or phnum != 1 or
+            shoff != 0 or shentsize != 0 or shnum != 0 or shstrndx != 0 or
             phoff + phentsize > len(data)):
         raise ValueError("bootstrap init ELF header or entry changed")
     segment = struct.unpack_from("<IIQQQQQQ", data, phoff)
@@ -179,7 +187,7 @@ def check_init_elf(data: bytes) -> None:
     if (kind != 1 or permissions != 5 or offset != 0x1000 or
             virtual != 0x10000 or physical != virtual or
             not 0 < file_size <= 0x2000 or memory_size != file_size or
-            alignment != 0x1000 or offset + file_size > len(data)):
+            alignment != 0x1000 or offset + file_size != len(data)):
         raise ValueError("bootstrap init load segment changed or exceeds its bound")
 
 
@@ -389,7 +397,7 @@ def build(args: argparse.Namespace) -> None:
     with tempfile.TemporaryDirectory() as folder:
         temp = Path(folder)
         source = variant_sources(temp, profile, slot, 2038)
-        elf = build_init(temp, args.clang, args.ld, source)
+        elf = build_init(temp, args.clang, args.ld, args.objcopy, source)
         check_init_elf(elf)
         print(f"BUILD_LAYOUT_OK init.elf bytes={len(elf)} sha256={sha(elf)}")
         archive = gzip.compress(
@@ -403,7 +411,8 @@ def build(args: argparse.Namespace) -> None:
             raise RuntimeError("unexpected GZIP header")
         archive = archive[:9] + b"\xff" + archive[10:]
         if len(archive) > 2048:
-            raise ValueError("compressed initramfs exceeds the 2048-byte FDT payload space")
+            raise ValueError(
+                f"compressed initramfs is {len(archive)} bytes; the FDT payload space is 2048 bytes")
         payload["init.elf"] = elf
         payload["initramfs_overlay.cpio.gz"] = archive
         print(f"BUILD_LAYOUT_OK initramfs_overlay.cpio.gz bytes={len(archive)} sha256={sha(archive)}")
