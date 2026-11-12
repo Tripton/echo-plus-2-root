@@ -341,10 +341,15 @@ def variant_sources(temp: Path, profile: FirmwareProfile, slot: str,
             "    /* Refuse a changed boot image before touching its ramdisk. */\n"
             f"    movz x21, #0x{tail >> 16:04x}, lsl #16\n"
             f"    movk x21, #0x{tail & 0xffff:04x}\n"
-            "    ldr x16, [x21]\n"
-            "    ldr x17, ramdisk_tail\n"
-            "    cmp x16, x17\n"
+            "    adr x17, ramdisk_tail\n"
+            "    mov w18, #8\n"
+            "compare_tail_bytes:\n"
+            "    ldrb w16, [x21], #1\n"
+            "    ldrb w19, [x17], #1\n"
+            "    cmp w16, w19\n"
             "    b.ne forward\n"
+            "    subs w18, w18, #1\n"
+            "    b.ne compare_tail_bytes\n"
             "    movz x20, #0x41e3, lsl #16\n"
             "    movk x20, #0x2400",
         )
@@ -355,6 +360,18 @@ def variant_sources(temp: Path, profile: FirmwareProfile, slot: str,
             replacement + "\n    .balign 8\nramdisk_tail:\n"
             f"    .quad 0x{tail_word:016x}",
         )
+        # QEMU faults on the old unaligned eight-byte tail load. Compare
+        # bytes so this guard also works with strict early-boot alignment.
+        # Keep the archive at offset 1024 within the fixed LK cave.
+        fdt = replace_once(
+            fdt,
+            "/* Historical 4-byte diagnostic loop is retained for binary identity. "
+            "It is\n * unreachable in this selected release path. */\n"
+            "halt:\n    b halt\n", "")
+        fdt = replace_once(fdt, "    .balign 8\nramdisk_tail:", "ramdisk_tail:")
+        # The final barrier still completes all cache cleans before handoff.
+        fdt = replace_once(fdt, "    bl clean_range\n    dsb sy\n    /* 5.",
+                           "    bl clean_range\n    /* 5.")
     (source / "fdt_initrd.S").write_text(fdt)
     return source
 
