@@ -89,6 +89,17 @@ Keep the Echo powered on for stage 2. This temporary access disappears at the ne
 
 To keep root after a normal boot, you need to install the second stage app. It uses CVE-2019-2215 to regain root after a cold boot.
 We use the temporary root session from the previous stage to install a signed app that runs at boot.
+
+This stage also needs your computer's ADB key pair at `~/.android/adbkey` and `~/.android/adbkey.pub`. If neither file exists, create the pair before continuing:
+
+```sh
+mkdir -p ~/.android
+adb keygen ~/.android/adbkey
+adb kill-server
+```
+
+Keep the private key. If only one file exists, restore its matching pair instead of generating a new one.
+
 To install the app, run:
 ```sh
 python3 echo_plus2.py persist

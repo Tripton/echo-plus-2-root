@@ -541,6 +541,16 @@ def persist(private: Path, tools: dict[str, object], *, resume_stock: bool = Fal
     serial = usb_serial_from_cmdline() if resume_stock else wait_recovery(state["usb_serial"])
     if serial != state["usb_serial"] or adb("shell", "cat /proc/sys/kernel/random/boot_id").strip() != state["recovery_boot_id"]:
         raise RuntimeError("Temporary recovery has restarted; run boot again")
+    key_private = Path.home() / ".android/adbkey"
+    key_public = Path.home() / ".android/adbkey.pub"
+    if not key_private.is_file() or not key_public.is_file():
+        raise RuntimeError(
+            "This host needs an ADB key pair before persist. If neither file exists, "
+            "run `mkdir -p ~/.android && adb keygen ~/.android/adbkey && adb kill-server`, then retry. "
+            "If one file exists, restore its matching pair instead of replacing it")
+    public_copy = private / "adbkey.pub"
+    if public_copy.exists() and public_copy.read_bytes() != key_public.read_bytes():
+        raise RuntimeError("Saved ADB public key differs from this host")
     sdk = Path(tools["sdk"])
     env = os.environ.copy()
     env["ANDROID_SDK_ROOT"] = str(sdk)
@@ -588,12 +598,6 @@ def persist(private: Path, tools: dict[str, object], *, resume_stock: bool = Fal
                              ("/system_root/init.mt8167.usb.rc", "init.mt8167.usb.rc"),
                              ("/system_root/init.usb.rc", "init.usb.rc")):
             save_recovery_file(remote, stock / name)
-    key_public = Path.home() / ".android/adbkey.pub"
-    if not key_public.is_file():
-        raise RuntimeError("Missing this host's existing ADB public key")
-    public_copy = private / "adbkey.pub"
-    if public_copy.exists() and public_copy.read_bytes() != key_public.read_bytes():
-        raise RuntimeError("Saved ADB public key differs from this host")
     public_copy.write_bytes(key_public.read_bytes())
     call(tools["python"], ROOT / "src/bootstrap/stock-transition/build.py",
          "--policy", stock / "sepolicy", "--stock-usb-rc", stock / "init.mt8167.usb.rc",
