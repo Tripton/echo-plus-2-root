@@ -26,7 +26,8 @@ import sys
 from build import (INPUTS, NS65741_8149N_INPUTS, OUTPUTS,
                    POLICY_LOADER_RUNTIME_SHA256,
                    NS65741_8149N_POLICY_LOADER_RUNTIME_SHA256,
-                   check_captured, patch_mtp_usb, policy_runtime_sha256,
+                   check_captured, check_switchroot_elf, patch_mtp_usb,
+                   policy_runtime_sha256,
                    replace_once, TCP_ADB_ON, TCP_ADB_OFF,
                    USB_DISABLE_TRIGGER, USB_INERT_TRIGGER)
 
@@ -138,7 +139,7 @@ def local_preflight(args: argparse.Namespace) -> dict[str, bytes]:
                      if exact_inputs else (args.built_dir / "safe-usb.rc").read_bytes()),
         "preserve_usb": (checked_file(args.built_dir / "preserve-usb.rc", *OUTPUTS["preserve-usb.rc"])
                          if exact_inputs else (args.built_dir / "preserve-usb.rc").read_bytes()),
-        "switchroot": checked_file(args.built_dir / "switchroot.elf", *OUTPUTS["switchroot.elf"]),
+        "switchroot": check_switchroot_elf((args.built_dir / "switchroot.elf").read_bytes()),
         "helper": checked_file(args.helper, args.helper.stat().st_size, args.helper_sha256),
         "apk": checked_file(args.apk, args.apk.stat().st_size, args.apk_sha256),
     }
@@ -204,20 +205,19 @@ def verify_recovery(args: argparse.Namespace, files: dict[str, bytes]):
         if adb_bytes(args, "exec-out", "cat", remote) != files[local]:
             raise RuntimeError(f"live stock input differs: {remote}")
     profile = by_name(args.profile)
-    if (profile, args.slot) != (NS6575_8338N, "a"):
-        fingerprints = []
-        for path in ("/system_root/system/build.prop", "/system_root/build.prop"):
-            try:
-                properties = adb_bytes(args, "exec-out", "cat", path, timeout=10)
-            except RuntimeError:
-                continue
-            fingerprints.extend(re.findall(rb"(?m)^ro\.build\.fingerprint=(.+)$", properties))
-        if not fingerprints or set(fingerprints) != {profile.fingerprint.encode("ascii")}:
-            raise RuntimeError("mounted stock system fingerprint is not the selected boot image")
-        symbols = adb_bytes(args, "exec-out", "cat", "/proc/kallsyms", timeout=20)
-        matches = re.findall(rb"(?m)^([0-9a-f]{16}) [tT] sel_read_enforce$", symbols)
-        if matches != [f"{profile.sel_read_enforce:016x}".encode("ascii")]:
-            raise RuntimeError("running kernel address differs from the selected image")
+    fingerprints = []
+    for path in ("/system_root/system/build.prop", "/system_root/build.prop"):
+        try:
+            properties = adb_bytes(args, "exec-out", "cat", path, timeout=10)
+        except RuntimeError:
+            continue
+        fingerprints.extend(re.findall(rb"(?m)^ro\.build\.fingerprint=(.+)$", properties))
+    if not fingerprints or set(fingerprints) != {profile.fingerprint.encode("ascii")}:
+        raise RuntimeError("mounted stock system fingerprint is not the selected boot image")
+    symbols = adb_bytes(args, "exec-out", "cat", "/proc/kallsyms", timeout=20)
+    matches = re.findall(rb"(?m)^([0-9a-f]{16}) [tT] sel_read_enforce$", symbols)
+    if matches != [f"{profile.sel_read_enforce:016x}".encode("ascii")]:
+        raise RuntimeError("running kernel address differs from the selected image")
     ports = [p for p in list_ports.comports() if (p.vid, p.pid) == (0x0E8D, 0x2007)]
     if len(ports) != 1:
         raise RuntimeError("expected exactly one Plus 2 recovery serial port")

@@ -22,7 +22,7 @@ import configure_gate
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "src/bootstrap"))
-from firmware_profiles import NS6575_8338N, by_name
+from firmware_profiles import NS6575_8338N, PROFILES, by_name
 # Everything created by this guide stays in one Git-ignored tree. Source and
 # captures can then travel together without adding device data to a commit.
 LOCAL = ROOT / "local"
@@ -129,6 +129,49 @@ def selected_firmware(state: dict[str, str]):
     if len(parts) != 2 or parts[1] not in ("a", "b"):
         raise RuntimeError("Saved firmware profile or slot is malformed; rebuild from dump")
     return by_name(parts[0]), parts[1]
+
+
+def parse_recovery_firmware(mounts: str, properties: list[str], symbols: str):
+    """Identify the running stock system and kernel in the USB RAM recovery."""
+    mounted = re.findall(r"(?m)^/dev/mmcblk0p(13|14) /system_root ext4 ro,", mounts)
+    if len(mounted) != 1:
+        raise RuntimeError("Could not identify one read-only active system slot")
+    slot = {"13": "a", "14": "b"}[mounted[0]]
+    fingerprints = set()
+    for content in properties:
+        fingerprints.update(re.findall(r"(?m)^ro\.build\.fingerprint=([^\r\n]+)$", content))
+    if len(fingerprints) != 1:
+        raise RuntimeError("Mounted stock system has no unique build fingerprint")
+    matches = [profile for profile in PROFILES if profile.fingerprint in fingerprints]
+    if len(matches) != 1:
+        raise RuntimeError("Mounted stock system has an unsupported build fingerprint")
+    profile = matches[0]
+    addresses = re.findall(r"(?m)^([0-9a-f]{16}) [tT] sel_read_enforce$", symbols)
+    if addresses != [f"{profile.sel_read_enforce:016x}"]:
+        raise RuntimeError("Running kernel differs from the mounted stock system profile")
+    return profile, slot
+
+
+def recovery_firmware():
+    mounts = adb("shell", "cat /proc/mounts")
+    properties = []
+    for path in ("/system_root/system/build.prop", "/system_root/build.prop"):
+        try:
+            properties.append(adb("exec-out", "cat", path))
+        except subprocess.CalledProcessError:
+            continue
+    symbols = adb("exec-out", "cat", "/proc/kallsyms")
+    return parse_recovery_firmware(mounts, properties, symbols)
+
+
+def stock_firmware():
+    """Identify the same boot after a completed stock-init handoff."""
+    fingerprint = adb("shell", "getprop ro.build.fingerprint").strip()
+    suffix = adb("shell", "getprop ro.boot.slot_suffix").strip()
+    matches = [profile for profile in PROFILES if profile.fingerprint == fingerprint]
+    if len(matches) != 1 or suffix not in ("_a", "_b"):
+        raise RuntimeError("Stock Android has an unsupported fingerprint or boot slot")
+    return matches[0], suffix[1]
 
 
 def save_state(private: Path, state: dict[str, str]) -> None:
@@ -301,6 +344,16 @@ def usb_serial_from_cmdline() -> str:
         # report a transport identifier instead of the kernel's device serial.
         print("RECOVERY_ADB_TRANSPORT_SERIAL_DIFFERS: checking kernel identity",
               flush=True)
+    return serial
+
+
+def stock_usb_serial() -> str:
+    if adb("get-state").strip() != "device":
+        raise RuntimeError("Stock Android USB ADB is not ready")
+    serial = adb("get-serialno").strip()
+    if (not serial or serial != adb("shell", "getprop ro.serialno").strip() or
+            adb("shell", "getprop ro.boot.hardware").strip() != "mt8167"):
+        raise RuntimeError("Stock Android USB identity differs")
     return serial
 
 
@@ -532,15 +585,24 @@ def recover_root(private: Path) -> None:
 
 def persist(private: Path, tools: dict[str, object], *, resume_stock: bool = False) -> None:
     state = read_state(private)
-    profile, slot = selected_firmware(state)
     if not state.get("usb_serial") or not state.get("recovery_boot_id"):
         raise RuntimeError("Run python3 echo_plus2.py boot first")
     # Reuse the recovery started by `boot`. A new BootROM cycle would make a
     # stale install state easy to mistake for the same running device.
     phase("Checking the selected Echo and boot session")
-    serial = usb_serial_from_cmdline() if resume_stock else wait_recovery(state["usb_serial"])
+    serial = stock_usb_serial() if resume_stock else wait_recovery(state["usb_serial"])
     if serial != state["usb_serial"] or adb("shell", "cat /proc/sys/kernel/random/boot_id").strip() != state["recovery_boot_id"]:
         raise RuntimeError("Temporary recovery has restarted; run boot again")
+    profile, slot = stock_firmware() if resume_stock else recovery_firmware()
+    detected = f"{profile.name} {slot}"
+    print(f"RECOVERY_FIRMWARE_PROFILE {profile.name} slot {slot.upper()}", flush=True)
+    built_marker = BOOT_BUILD / "firmware-profile.txt"
+    if not built_marker.is_file() or built_marker.read_text() != detected + "\n":
+        raise RuntimeError("Running firmware differs from the RAM image; rebuild from this Echo's dump")
+    if state.get("firmware_profile") and selected_firmware(state) != (profile, slot):
+        raise RuntimeError("Saved firmware profile differs from the running Echo; rebuild from its dump")
+    state["firmware_profile"] = detected
+    save_state(private, state)
     key_private = Path.home() / ".android/adbkey"
     key_public = Path.home() / ".android/adbkey.pub"
     if not key_private.is_file() or not key_public.is_file():

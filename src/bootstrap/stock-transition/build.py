@@ -31,10 +31,11 @@ NS65741_8149N_INPUTS = {
     "policy": (357607, "b3f0276427bd28167b21b45c952d4b0eb710ff9376999660b7a179a7b0beaaf2"),
 }
 OUTPUTS = {
-    "switchroot.elf": (5208, "08a9575891d669e941ec3e9ae49add383268a1f724649acf840fee00b561c016"),
     "safe-usb.rc": (29573, "b471071305577c0fcade3b73072c0c87d28aacf9f78bee1e58bcdf9fbf26c2b9"),
     "preserve-usb.rc": (5726, "5c41a8b9ef664b0802ca7fbabe9f96b2eddff5c3e5845fd54db0ad9ff78750df"),
 }
+SWITCHROOT_MAPPED_SIZE = 800
+SWITCHROOT_MAPPED_SHA256 = "94363b82f551154eb3301c357e12d98acd6c0dbd5c32e436833ceddacb31c6fc"
 # The research policy loader included host-path-dependent DWARF sections.
 # Its mapped ELF bytes are reproducible even when those debug sections differ.
 # This digest covers every PT_LOAD segment (including ELF and program headers),
@@ -111,6 +112,34 @@ def compile_switchroot(clang: str, ld: str) -> bytes:
                         "-z", "max-page-size=0x1000", "--strip-all",
                         "-o", str(elf_file), str(object_file)], check=True)
         return elf_file.read_bytes()
+
+
+def check_switchroot_elf(image: bytes) -> bytes:
+    """Pin the executable bytes and load layout, not host ELF section metadata."""
+    if (not 4096 <= len(image) <= 65536 or
+            image[:16] != b"\x7fELF\x02\x01\x01" + bytes(9)):
+        raise ValueError("switchroot is not the expected little-endian ELF64 image")
+    (elf_type, machine, version, entry, phoff, _, flags, ehsize,
+     phentsize, phnum, _, _, _) = struct.unpack_from("<HHIQQQIHHHHHH", image, 16)
+    if (elf_type != 2 or machine != 183 or version != 1 or
+            entry != 0x10000 or flags != 0 or ehsize != 64 or
+            phentsize != 56 or phnum != 1 or phoff < 64 or
+            phoff + phentsize > len(image)):
+        raise ValueError("switchroot ELF header or entry differs")
+    kind, permissions, offset, virtual, physical, size, memory_size, alignment = (
+        struct.unpack_from("<IIQQQQQQ", image, phoff))
+    if (kind != 1 or permissions != 5 or virtual != 0x10000 or
+            physical != virtual or size != SWITCHROOT_MAPPED_SIZE or
+            memory_size != size or alignment != 0x1000 or
+            offset < phoff + phentsize or offset % alignment != virtual % alignment or
+            offset + size > len(image)):
+        raise ValueError("switchroot load segment differs")
+    mapped = sha(image[offset:offset + size])
+    if mapped != SWITCHROOT_MAPPED_SHA256:
+        raise ValueError(f"switchroot executable bytes differ from the tested image: "
+                         f"mapped_sha256={mapped} full_sha256={sha(image)}")
+    print(f"CHECK_OK switchroot.elf mapped_sha256={mapped} full_sha256={sha(image)}")
+    return image
 
 
 def policy_runtime_sha256(image: bytes) -> str:
@@ -200,8 +229,7 @@ def main() -> None:
         raise ValueError("policy loader is not reproducible across two builds")
     output = {
         "policy-loader.elf": loader,
-        "switchroot.elf": check(compile_switchroot(args.clang, args.ld),
-                                 "switchroot.elf", OUTPUTS),
+        "switchroot.elf": check_switchroot_elf(compile_switchroot(args.clang, args.ld)),
         "safe-usb.rc": check(safe, "safe-usb.rc", OUTPUTS) if exact_inputs else safe,
         "preserve-usb.rc": check(preserve, "preserve-usb.rc", OUTPUTS) if exact_inputs else preserve,
     }
