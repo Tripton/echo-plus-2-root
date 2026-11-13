@@ -106,6 +106,8 @@ def preflight(args: argparse.Namespace) -> list[tuple[int, bytes, str]]:
     for (address, data, name), (next_address, _, _) in zip(stages, stages[1:]):
         if address + align(len(data), 512) > next_address:
             raise ValueError(f"SRAM staging overlap after {name}")
+    if args.run:
+        print(f"RAM_IMAGE_SHA256 fdt_initrd.bin={sha(payload['fdt_initrd.bin'])}", flush=True)
     print(f"PREFLIGHT_BOOTSTRAP_RUN_OK: {profile.name} slot {slot.upper()} validated payloads and SRAM layout", flush=True)
     return stages
 

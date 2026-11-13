@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 import configure_gate
@@ -40,6 +41,31 @@ START = time.monotonic()
 
 def phase(label: str) -> None:
     print(f"\n[{time.strftime('%H:%M:%S')} +{time.monotonic() - START:.0f}s] {label}", flush=True)
+
+
+def report_source_revision() -> None:
+    """Identify the source checkout in logs before any host or device work."""
+    try:
+        top = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=15)
+        if top.returncode != 0 or Path(top.stdout.strip()).resolve() != ROOT:
+            print("REPO_COMMIT unavailable tracked_changes=unknown", flush=True)
+            return
+        commit = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "--verify", "HEAD"],
+            capture_output=True, text=True, timeout=15)
+        changes = subprocess.run(
+            ["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        print("REPO_COMMIT unavailable tracked_changes=unknown", flush=True)
+        return
+    if commit.returncode != 0 or changes.returncode != 0:
+        print("REPO_COMMIT unavailable tracked_changes=unknown", flush=True)
+        return
+    print(f"REPO_COMMIT {commit.stdout.strip()} "
+          f"tracked_changes={'yes' if changes.stdout else 'no'}", flush=True)
 
 
 def call(*parts: object, env: dict[str, str] | None = None, capture: bool = False) -> str:
@@ -275,6 +301,77 @@ def usb_serial_from_cmdline() -> str:
     return serial
 
 
+def parse_ioreg_mtk_devices(output: str) -> tuple[str, ...]:
+    """Extract MediaTek USB identities without logging other USB devices."""
+    devices = []
+    properties = {}
+
+    def collect() -> None:
+        if properties.get("idVendor") == "3725" and "idProduct" in properties:
+            product = int(properties["idProduct"])
+            session = properties.get("sessionID", "unknown")
+            devices.append(f"0e8d:{product:04x} session={session}")
+
+    for line in output.splitlines():
+        if line.lstrip().startswith("+-o "):
+            collect()
+            properties = {}
+        match = re.search(r'"(idVendor|idProduct|sessionID)"\s*=\s*(\d+)', line)
+        if match:
+            properties[match.group(1)] = match.group(2)
+    collect()
+    return tuple(sorted(devices))
+
+
+def mtk_usb_snapshot(root: Path = Path("/sys/bus/usb/devices")) -> tuple[str, ...] | None:
+    """Observe USB enumeration only; a VID:PID does not prove an Echo identity."""
+    if platform.system() == "Linux":
+        if not root.is_dir():
+            return None
+        devices = []
+        try:
+            for entry in root.iterdir():
+                vendor = entry / "idVendor"
+                product = entry / "idProduct"
+                if not vendor.is_file() or not product.is_file():
+                    continue
+                try:
+                    if vendor.read_text().strip().lower() != "0e8d":
+                        continue
+                    pid = product.read_text().strip().lower()
+                    number = (entry / "devnum").read_text().strip()
+                except OSError:
+                    continue  # A device may disappear during enumeration.
+                devices.append(f"0e8d:{pid} port={entry.name} devnum={number}")
+        except OSError:
+            return None
+        return tuple(sorted(devices))
+    if platform.system() == "Darwin":
+        try:
+            result = subprocess.run(
+                ["/usr/sbin/ioreg", "-p", "IOUSB", "-r", "-c", "IOUSBHostDevice",
+                 "-l", "-w", "0"], capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return parse_ioreg_mtk_devices(result.stdout) if result.returncode == 0 else None
+    return None
+
+
+def watch_mtk_usb(stop: threading.Event) -> None:
+    started = time.monotonic()
+    previous = None
+    while not stop.is_set():
+        snapshot = mtk_usb_snapshot()
+        if snapshot is None:
+            print("USB_TIMELINE_UNAVAILABLE", flush=True)
+            return
+        if snapshot != previous:
+            print(f"USB_TIMELINE +{time.monotonic() - started:.1f}s "
+                  f"{', '.join(snapshot) if snapshot else 'none'}", flush=True)
+            previous = snapshot
+        stop.wait(0.5)
+
+
 def wait_recovery(expected_serial: str | None) -> str:
     deadline = time.monotonic() + 150
     continued_fastboot = False
@@ -342,13 +439,21 @@ def boot(private: Path, tools: dict[str, object], *, resume: bool = False) -> No
               "--built-dir", BOOT_BUILD]
     call(*runner)
     use_sdk_platform_tools(detect_sdk())
-    if resume:
-        phase("Resuming the running USB recovery after an interrupted guide")
-    else:
+    if not resume:
         prompt_cycle()
-        phase("Starting temporary root from RAM")
-        call(*runner, "--run")
-    serial = wait_recovery(state.get("usb_serial"))
+    usb_stop = threading.Event()
+    usb_thread = threading.Thread(target=watch_mtk_usb, args=(usb_stop,), daemon=True)
+    usb_thread.start()
+    try:
+        if resume:
+            phase("Resuming the running USB recovery after an interrupted guide")
+        else:
+            phase("Starting temporary root from RAM")
+            call(*runner, "--run")
+        serial = wait_recovery(state.get("usb_serial"))
+    finally:
+        usb_stop.set()
+        usb_thread.join(timeout=6)
     if state.get("usb_serial") and state["usb_serial"] != serial:
         raise RuntimeError("Recovery serial differs from the saved target")
     state["usb_serial"] = serial
@@ -658,6 +763,7 @@ def main() -> None:
     status_parser.add_argument("--config", type=Path, default=LOCAL / "config.toml")
     commands.add_parser("kiosk-setup", help="start installed Kiosk Satellite and forward its setup page over USB")
     args = parser.parse_args()
+    report_source_revision()
     if args.stage == "check":
         host(args, android=True)
         print("HOST_PREFLIGHT_OK", flush=True)
