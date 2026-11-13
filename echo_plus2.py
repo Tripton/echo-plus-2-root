@@ -297,7 +297,10 @@ def usb_serial_from_cmdline() -> str:
     serial = match.group(1)
     reported = adb("get-serialno").strip()
     if reported and reported != serial:
-        raise RuntimeError("USB ADB and kernel serials differ")
+        # Our RAM init leaves the USB gadget iSerial blank. Linux ADB may
+        # report a transport identifier instead of the kernel's device serial.
+        print("RECOVERY_ADB_TRANSPORT_SERIAL_DIFFERS: checking kernel identity",
+              flush=True)
     return serial
 
 

@@ -83,12 +83,16 @@ def adb_bytes(args: argparse.Namespace, *items: str, timeout: int = 30) -> bytes
     return result.stdout
 
 
-def adb_usb_serial(args: argparse.Namespace) -> str:
+def kernel_serial_from_cmdline(args: argparse.Namespace) -> str:
     cmdline = adb(args, "shell", "cat /proc/cmdline")
     match = re.search(r"(?:^|\s)androidboot\.serialno=([A-Z0-9]{12,24})(?=\s|$)", cmdline)
     if not match or "androidboot.hardware=mt8167" not in cmdline.split():
         raise RuntimeError("USB Echo kernel identity is missing or differs")
-    serial = match.group(1)
+    return match.group(1)
+
+
+def adb_usb_serial(args: argparse.Namespace) -> str:
+    serial = kernel_serial_from_cmdline(args)
     reported = adb(args, "get-serialno")
     if reported and reported != serial:
         raise RuntimeError("USB ADB and kernel serials differ")
@@ -192,7 +196,7 @@ def verify_recovery(args: argparse.Namespace, files: dict[str, bytes]):
     import serial
     from serial.tools import list_ports
 
-    if adb(args, "get-state") != "recovery" or adb_usb_serial(args) != args.target_serial:
+    if adb(args, "get-state") != "recovery" or kernel_serial_from_cmdline(args) != args.target_serial:
         raise RuntimeError("USB ADB is not the selected Plus 2 recovery")
     for remote, local in (("/system_root/sepolicy", "policy"),
                           ("/system_root/init.mt8167.usb.rc", "stock_usb"),
