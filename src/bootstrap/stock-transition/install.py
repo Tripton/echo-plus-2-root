@@ -15,6 +15,7 @@ import argparse
 import hashlib
 import json
 import re
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -172,17 +173,18 @@ def local_preflight(args: argparse.Namespace) -> dict[str, bytes]:
 
 
 def serial_command(port, line: str, *, timeout: int = 8) -> str:
+    marker = f"LIDAR_COMMAND_DONE_{secrets.token_hex(8)}"
     port.reset_input_buffer()
-    port.write(line.encode("ascii") + b"\n")
+    port.write(f"{line}; printf '\\n{marker}\\n'\n".encode("ascii"))
     output = bytearray()
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         output.extend(port.read(4096))
-        if PROMPT in output:
-            break
-    if PROMPT not in output:
-        raise RuntimeError(f"recovery serial prompt absent after {line.split()[0]}")
-    return bytes(output).decode("utf-8", "replace").replace("\r", "")
+        normalized = bytes(output).replace(b"\r", b"")
+        completed = re.search(rb"(?m)^" + marker.encode("ascii") + rb"$", normalized)
+        if completed and PROMPT in normalized[completed.end():]:
+            return normalized.decode("utf-8", "replace")
+    raise RuntimeError(f"recovery serial completion absent after {line.split()[0]}")
 
 
 def serial_checked(port, line: str, label: str, *, timeout: int = 20) -> str:
@@ -223,8 +225,9 @@ def verify_recovery(args: argparse.Namespace, files: dict[str, bytes]):
         raise RuntimeError("expected exactly one Plus 2 recovery serial port")
     port = serial.Serial(ports[0].device, 115200, timeout=0.2, write_timeout=2)
     try:
-        if "uid=0(root) gid=0(root)" not in serial_command(port, "id"):
-            raise RuntimeError("temporary recovery shell is not UID 0")
+        identity = serial_command(port, "id")
+        if not re.search(r"(?m)^uid=0(?:\(root\))? gid=0(?:\(root\))?(?:\s|$)", identity):
+            raise RuntimeError(f"temporary recovery shell is not UID 0: {identity[-200:]!r}")
         if args.target_serial not in serial_command(port, "cat /proc/cmdline"):
             raise RuntimeError("recovery cmdline identity differs")
         if "CapEff:\t0000003fffffffff" not in serial_command(port, "cat /proc/1/status"):
