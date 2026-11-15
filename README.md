@@ -12,6 +12,8 @@ To use the BootROM exploit, you need a USB data connection to the Echo. Check **
 
 ![External USB contacts and matching board pads](physical-access.png)
 
+EchoMuseProject shared a [printable programming dock](https://makerworld.com/en/models/3614602-echo-plus-gen-2-programming-dock#profileId-4142861) that holds pogo pins against these contacts without soldering to the Echo. I have not tested that dock. Check its fit and the contact mapping before connecting USB.
+
 Connect these contacts to your computer with USB data. Keep the Echo's power supply within reach for the BootROM steps below.
 
 ## Prepare the computer
