@@ -23,7 +23,9 @@ import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from build import INPUTS, OUTPUTS, POLICY_LOADER_RUNTIME_SHA256, policy_runtime_sha256
+from build import (INPUTS, OUTPUTS, POLICY_LOADER_RUNTIME_SHA256,
+                   SWITCHROOT_RUNTIME_SHA256, policy_runtime_sha256,
+                   switchroot_runtime_sha256)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -83,7 +85,11 @@ def adb_usb_serial(args: argparse.Namespace) -> str:
         raise RuntimeError("USB Echo kernel identity is missing or differs")
     serial = match.group(1)
     reported = adb(args, "get-serialno")
-    if reported and reported != serial:
+    # The RAM recovery deliberately clears the USB gadget serial, so recent
+    # adb clients report their "unknown" placeholder instead of an empty
+    # string. That placeholder is not a serial; a genuinely different serial
+    # from another connected device must still fail this check.
+    if reported and reported != "unknown" and reported != serial:
         raise RuntimeError("USB ADB and kernel serials differ")
     return serial
 
@@ -96,7 +102,6 @@ def local_preflight(args: argparse.Namespace) -> dict[str, bytes]:
         "generic_usb": checked_file(args.generic_usb_rc, *INPUTS["generic_usb_rc"]),
         "safe_usb": checked_file(args.built_dir / "safe-usb.rc", *OUTPUTS["safe-usb.rc"]),
         "preserve_usb": checked_file(args.built_dir / "preserve-usb.rc", *OUTPUTS["preserve-usb.rc"]),
-        "switchroot": checked_file(args.built_dir / "switchroot.elf", *OUTPUTS["switchroot.elf"]),
         "helper": checked_file(args.helper, args.helper.stat().st_size, args.helper_sha256),
         "apk": checked_file(args.apk, args.apk.stat().st_size, args.apk_sha256),
     }
@@ -104,6 +109,10 @@ def local_preflight(args: argparse.Namespace) -> dict[str, bytes]:
     if policy_runtime_sha256(loader) != POLICY_LOADER_RUNTIME_SHA256:
         raise RuntimeError("policy loader runtime image differs from the tested ELF")
     files["policy_loader"] = loader
+    switchroot = (args.built_dir / "switchroot.elf").read_bytes()
+    if switchroot_runtime_sha256(switchroot) != SWITCHROOT_RUNTIME_SHA256:
+        raise RuntimeError("switchroot runtime image differs from the tested ELF")
+    files["switchroot"] = switchroot
     key = args.adb_pubkey.read_bytes()
     if not (200 <= len(key) <= 8192 and key.isascii() and
             b"\x00" not in key and len(key.splitlines()) == 1):
@@ -154,6 +163,14 @@ def verify_recovery(args: argparse.Namespace, files: dict[str, bytes]):
     if len(ports) != 1:
         raise RuntimeError("expected exactly one Plus 2 recovery serial port")
     port = serial.Serial(ports[0].device, 115200, timeout=0.2, write_timeout=2)
+    # The gadget's f_acm discards host data until the SET_CONTROL_LINE_STATE
+    # notification with DTR arrives. Linux applies that asynchronously after
+    # open(), so an immediate first command can lose its leading bytes
+    # (observed as an unrelated "not found" reply from the device shell).
+    # Assert the modem lines and let the notification settle first.
+    port.dtr = True
+    port.rts = True
+    time.sleep(0.3)
     try:
         if "uid=0(root) gid=0(root)" not in serial_command(port, "id"):
             raise RuntimeError("temporary recovery shell is not UID 0")

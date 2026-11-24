@@ -8,6 +8,7 @@ The later stock-init transition and APK installation are separate steps.
 """
 
 import argparse
+import gzip
 import hashlib
 import logging
 import re
@@ -16,7 +17,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from build import OUTPUTS, PINNED, SOURCE, align, sha
+from build import (OUTPUTS, PINNED, SOURCE, align, check_init_elf, check_layout,
+                   cpio_entries, sha)
 
 
 TESTED_MTKCLIENT_REVISION = "7cb40e727727dfe3faa065eefb29b16ed29bbdf1"
@@ -56,12 +58,24 @@ def preflight(args: argparse.Namespace) -> list[tuple[int, bytes, str]]:
     if not args.stage1.resolve().is_relative_to(args.mtkclient_root.resolve()):
         raise ValueError("Stage-1 file must belong to the checked MTKClient clone")
 
-    # 2. Confirm every offline-generated file, even the two that are embedded
-    # inside the handoff image. No firmware dump is read by this launcher.
+    # 2. Confirm every offline-generated file. The three host-built bootstrap
+    # files are validated structurally against their one loadable segment and
+    # the fixed memory bounds; every fixed patch stays byte-pinned. No
+    # firmware dump is read by this launcher.
     payload = {name: checked_file(args.built_dir / name, *expected)
                for name, expected in OUTPUTS.items()}
-    if payload["fdt_initrd.bin"][1024:1024 + 2038] != payload["initramfs_overlay.cpio.gz"]:
-        raise ValueError("embedded initramfs overlay differs")
+    for name in ("init.elf", "initramfs_overlay.cpio.gz", "fdt_initrd.bin"):
+        payload[name] = (args.built_dir / name).read_bytes()
+    check_init_elf(payload["init.elf"])
+    archive = payload["initramfs_overlay.cpio.gz"]
+    if not 0 < len(archive) <= 2048 or archive[:3] != b"\x1f\x8b\x08":
+        raise ValueError("bootstrap initramfs size or gzip header changed")
+    if cpio_entries(gzip.decompress(archive)) != {
+            "init": payload["init.elf"], "sbin": b"",
+            "sbin/multi_init": b"../init"}:
+        raise ValueError("bootstrap initramfs members differ")
+    check_layout(payload)
+    print(f"RAM_IMAGE_SHA256 fdt_initrd.bin={sha(payload['fdt_initrd.bin'])}", flush=True)
     stages = []
     for address, name in STAGE_ADDRESSES:
         data = payload[name]

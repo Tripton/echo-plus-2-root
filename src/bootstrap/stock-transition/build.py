@@ -22,7 +22,6 @@ INPUTS = {
     "generic_usb_rc": (5715, "477c933077c6be4b851e8664da88f0529157ddeda6eed6f48ced6b2b8315092e"),
 }
 OUTPUTS = {
-    "switchroot.elf": (5208, "08a9575891d669e941ec3e9ae49add383268a1f724649acf840fee00b561c016"),
     "safe-usb.rc": (29573, "b471071305577c0fcade3b73072c0c87d28aacf9f78bee1e58bcdf9fbf26c2b9"),
     "preserve-usb.rc": (5726, "5c41a8b9ef664b0802ca7fbabe9f96b2eddff5c3e5845fd54db0ad9ff78750df"),
 }
@@ -32,6 +31,11 @@ OUTPUTS = {
 # its virtual address, flags and memory size. Only section-table metadata in
 # the ELF header is normalized because the kernel loader does not use it.
 POLICY_LOADER_RUNTIME_SHA256 = "19ed809d4d8bcdff05add13b5a3c9e50d525de520fa66a55958981a047c3c836"
+# switchroot.elf is pure assembly, so its mapped .text is identical across
+# host LLVM builds of the tested version; only the nonloadable .comment
+# version strings differ by build. Its digest covers the one PT_LOAD segment,
+# its virtual address, flags and memory size, like the policy loader above.
+SWITCHROOT_RUNTIME_SHA256 = "2092277f2882fd7ea658573c4586bd84b225fc7e41530d46a964c61c8dfaa4bc"
 TCP_ADB_ON = b"    setprop service.adb.tcp.port 5555\n"
 TCP_ADB_OFF = b"    setprop service.adb.tcp.port -1\n"
 USB_DISABLE_TRIGGER = b"on property:sys.usb.config=none && property:sys.usb.configfs=0\n"
@@ -85,7 +89,34 @@ def compile_switchroot(clang: str, ld: str) -> bytes:
         subprocess.run([ld, "-T", str(ROOT / "switchroot.ld"),
                         "-z", "max-page-size=0x1000", "--strip-all",
                         "-o", str(elf_file), str(object_file)], check=True)
-        return elf_file.read_bytes()
+        image = elf_file.read_bytes()
+    actual = switchroot_runtime_sha256(image)
+    if actual != SWITCHROOT_RUNTIME_SHA256:
+        raise ValueError("switchroot mapped bytes differ from the tested ELF")
+    print(f"CHECK_OK switchroot.elf mapped_sha256={actual} full_sha256={sha(image)}")
+    return image
+
+
+def switchroot_runtime_sha256(image: bytes) -> str:
+    if len(image) < 64 or image[:6] != b"\x7fELF\x02\x01":
+        raise ValueError("switchroot is not a little-endian ELF64 image")
+    elf_type, machine = struct.unpack_from("<HH", image, 16)
+    if elf_type != 2 or machine != 183:  # ET_EXEC, AArch64
+        raise ValueError("switchroot architecture or ELF type differs")
+    phoff = struct.unpack_from("<Q", image, 32)[0]
+    phentsize, phnum = struct.unpack_from("<HH", image, 54)
+    if phentsize != 56 or phnum != 1 or phoff + phentsize > len(image):
+        raise ValueError("switchroot program headers are invalid")
+    kind, flags, offset, vaddr, _, size, memsize, _ = struct.unpack_from(
+        "<IIQQQQQQ", image, phoff)
+    if (kind != 1 or flags != 5 or offset != 0x1000 or vaddr != 0x10000 or
+            size != memsize or not 0 < size <= 0x4000 or
+            offset + size > len(image)):
+        raise ValueError("switchroot load segment differs from the tested ELF")
+    digest = hashlib.sha256()
+    digest.update(struct.pack("<IQQQ", flags, vaddr, size, memsize))
+    digest.update(image[offset:offset + size])
+    return digest.hexdigest()
 
 
 def policy_runtime_sha256(image: bytes) -> str:
@@ -160,8 +191,7 @@ def main() -> None:
                             USB_INERT_TRIGGER, "generic USB disable trigger")
     output = {
         "policy-loader.elf": compile_policy_loader(args.policy_cc),
-        "switchroot.elf": check(compile_switchroot(args.clang, args.ld),
-                                 "switchroot.elf", OUTPUTS),
+        "switchroot.elf": compile_switchroot(args.clang, args.ld),
         "safe-usb.rc": check(safe, "safe-usb.rc", OUTPUTS),
         "preserve-usb.rc": check(preserve, "preserve-usb.rc", OUTPUTS),
     }
