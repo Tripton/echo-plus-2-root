@@ -85,7 +85,7 @@ def preflight(args: argparse.Namespace) -> list[tuple[int, bytes, str]]:
                for name, expected in OUTPUTS_BY_PROFILE_SLOT[profile.name, slot].items()}
     for name in ("init.elf", "initramfs_overlay.cpio.gz", "fdt_initrd.bin"):
         payload[name] = (args.built_dir / name).read_bytes()
-    check_init_elf(payload["init.elf"])
+    check_init_elf(payload["init.elf"], profile, slot)
     archive = payload["initramfs_overlay.cpio.gz"]
     if not 0 < len(archive) <= 2048 or archive[:3] != b"\x1f\x8b\x08":
         raise ValueError("bootstrap initramfs size or gzip header changed")

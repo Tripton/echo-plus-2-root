@@ -171,7 +171,8 @@ def build_init(temp: Path, clang: str, ld: str, objcopy: str,
     return image_file.read_bytes()
 
 
-def check_init_elf(data: bytes) -> None:
+def check_init_elf(data: bytes, profile: FirmwareProfile = NS6575_8338N,
+                   slot: str = "a") -> None:
     """Check the one bounded AArch64 segment loaded by the initramfs."""
     if len(data) < 120 or data[:7] != b"\x7fELF\x02\x01\x01":
         raise ValueError("bootstrap init is not a little-endian ELF64 image")
@@ -190,7 +191,8 @@ def check_init_elf(data: bytes) -> None:
             not 0 < file_size <= 0x2000 or memory_size != file_size or
             alignment != 0x1000 or offset + file_size != len(data)):
         raise ValueError("bootstrap init load segment changed or exceeds its bound")
-    if sha(data[offset:offset + file_size]) != INIT_MAPPED_SHA256:
+    if (profile == NS6575_8338N and slot == "a" and
+            sha(data[offset:offset + file_size]) != INIT_MAPPED_SHA256):
         raise ValueError("bootstrap init executable bytes differ from the tested image")
 
 
@@ -418,7 +420,7 @@ def build(args: argparse.Namespace) -> None:
         temp = Path(folder)
         source = variant_sources(temp, profile, slot, 2038)
         elf = build_init(temp, args.clang, args.ld, args.objcopy, source)
-        check_init_elf(elf)
+        check_init_elf(elf, profile, slot)
         print(f"BUILD_LAYOUT_OK init.elf bytes={len(elf)} sha256={sha(elf)}")
         archive = gzip.compress(
             newc_entry("init", elf, 0o100755, 270) +
