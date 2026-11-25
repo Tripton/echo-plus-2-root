@@ -234,7 +234,11 @@ def usb_serial_from_cmdline() -> str:
         raise RuntimeError("USB Echo kernel identity is missing or differs")
     serial = match.group(1)
     reported = adb("get-serialno").strip()
-    if reported and reported != serial:
+    # The RAM recovery deliberately clears the USB gadget serial, so recent
+    # adb clients report their "unknown" placeholder instead of an empty
+    # string. That placeholder is not a serial; a genuinely different serial
+    # from another connected device must still fail this check.
+    if reported and reported != "unknown" and reported != serial:
         raise RuntimeError("USB ADB and kernel serials differ")
     return serial
 

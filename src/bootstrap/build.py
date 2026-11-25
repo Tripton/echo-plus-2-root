@@ -25,13 +25,16 @@ PINNED = {
     "boot_a": (16777216, "3baf114f6382492e706795b229c4ff08f4fe62da6cf2172ba164830b518421b1"),
     "stage1": (1000, "0cec003fb8b594ed374270debc0aefb198d03d66d0f4ef3db5d5f1e706098296"),
 }
+# init.elf, initramfs_overlay.cpio.gz and fdt_initrd.bin embed a host-built
+# binary. Host LLVM builds of the same version only differ in nonloadable
+# metadata (compiler version strings in .comment), which the fixed 2048-byte
+# compressed archive budget cannot always absorb. Following the upstream
+# research fix, those three outputs are stripped to their loadable image and
+# checked structurally; every fixed patch below stays byte-pinned.
 OUTPUTS = {
-    "init.elf": (7952, "566dc3cdda18538c39de2d5c53ab2bc13a9923f7b6595db9c8928b4a0e6c50fb"),
-    "initramfs_overlay.cpio.gz": (2038, "1d1bb4544782f7bfb200f5c13230a85d92d22844f698b6faef6b3acd7e2bb6d1"),
     "preloader_snapshot.bin": (184, "5e2d0711bff088738fb00935c71dd3dfa80009305cf6b12bfc5fce6a63b401c9"),
     "lk_bridge.bin": (232, "5954b8fdb2e6e2083efa17124336026f407e5ad7ac7c150c0458038cc8b6e487"),
     "handoff_cave.bin": (128, "a35e334735dfa1b566b418e18ae3c513626068dd099ce2ee048a8e4ca1074392"),
-    "fdt_initrd.bin": (3064, "51e443fc6e0b2bb11cbf96e0db86931c7505e4a46abe96ec47dc69c15ea7d905"),
     "preloader_patched.bin": (145716, "1fd3baa00bb9a951ca3f7e5ef3a6ec4ac6d4c46696c190840814d0c04a1561c1"),
 }
 PRELOADER_BASE = 0x201000
@@ -120,23 +123,28 @@ def run(command: list[str], *, cwd: Path | None = None) -> None:
     subprocess.run(command, check=True, cwd=cwd)
 
 
-def build_init(temp: Path, clang: str, ld: str) -> bytes:
+def build_init(temp: Path, clang: str, ld: str, objcopy: str) -> bytes:
     object_file = temp / "init.o"
+    linked_file = temp / "init.linked.elf"
     image_file = temp / "init.elf"
     run([clang, "-target", "aarch64-none-elf", "-Oz", "-ffreestanding",
          "-fno-builtin", "-fno-stack-protector", "-fno-asynchronous-unwind-tables",
          "-nostdlib", "-c", str(SOURCE / "init.c"), "-o", str(object_file)])
     run([ld, "-T", str(SOURCE / "init.ld"), "-z", "max-page-size=0x1000",
-         "--strip-all", "-o", str(image_file), str(object_file)])
+         "--strip-all", "-o", str(linked_file), str(object_file)])
+    # The kernel's ELF loader uses program headers, not section headers.
+    # Keep only the loadable image so host toolchain metadata does not consume
+    # the fixed-size compressed initramfs space in LK.
+    run([objcopy, "--strip-sections", str(linked_file), str(image_file)])
     return image_file.read_bytes()
 
 
 def build_assembly(temp: Path, name: str, target: str, address: int,
-                   clang: str, ld: str, objcopy: str) -> bytes:
+                   clang: str, ld: str, objcopy: str, source: Path = SOURCE) -> bytes:
     object_file = temp / f"{name}.o"
     image_file = temp / f"{name}.elf"
     binary_file = temp / f"{name}.bin"
-    run([clang, "-target", target, "-c", str(SOURCE / f"{name}.S"),
+    run([clang, "-target", target, "-c", str(source / f"{name}.S"),
          "-o", str(object_file)], cwd=temp)
     run([ld, f"-Ttext=0x{address:x}", f"--entry=0x{address:x}",
          "-o", str(image_file), str(object_file)])
@@ -150,6 +158,27 @@ def check_output(data: bytes, name: str) -> bytes:
         raise ValueError(f"{name}: build differs from tested image")
     print(f"BUILD_OK {name} bytes={len(data)} sha256={sha(data)}")
     return data
+
+
+def check_init_elf(data: bytes) -> None:
+    """Check the one bounded AArch64 segment loaded by the initramfs."""
+    if len(data) < 120 or data[:7] != b"\x7fELF\x02\x01\x01":
+        raise ValueError("bootstrap init is not a little-endian ELF64 image")
+    header = struct.unpack_from("<HHIQQQIHHHHHH", data, 16)
+    (elf_type, machine, version, entry, phoff, shoff, flags, ehsize,
+     phentsize, phnum, shentsize, shnum, shstrndx) = header
+    if (elf_type != 2 or machine != 183 or version != 1 or entry != 0x10000 or
+            flags != 0 or ehsize != 64 or phentsize != 56 or phnum != 1 or
+            shoff != 0 or shentsize != 0 or shnum != 0 or shstrndx != 0 or
+            phoff + phentsize > len(data)):
+        raise ValueError("bootstrap init ELF header or entry changed")
+    segment = struct.unpack_from("<IIQQQQQQ", data, phoff)
+    kind, permissions, offset, virtual, physical, file_size, memory_size, alignment = segment
+    if (kind != 1 or permissions != 5 or offset != 0x1000 or
+            virtual != 0x10000 or physical != virtual or
+            not 0 < file_size <= 0x2000 or memory_size != file_size or
+            alignment != 0x1000 or offset + file_size != len(data)):
+        raise ValueError("bootstrap init load segment changed or exceeds its bound")
 
 
 def patch_preloader(source: bytes) -> bytes:
@@ -189,7 +218,33 @@ def check_lk(lk: bytes) -> None:
         raise ValueError("LK image does not include the AArch64 cave")
 
 
+def replace_once(text: str, old: str, new: str, expected: int = 1) -> str:
+    count = text.count(old)
+    if count != expected:
+        raise ValueError(f"expected {expected} occurrences of {old!r}, found {count}")
+    return text.replace(old, new)
+
+
+def variant_fdt_sources(temp: Path, archive_length: int) -> Path:
+    """Generate an FDT shim for the actual archive size without changing tested source."""
+    if archive_length == 2038:
+        return SOURCE
+    source = temp / "variant_sources"
+    source.mkdir(exist_ok=True)
+    fdt = (SOURCE / "fdt_initrd.S").read_text()
+    end = ARCHIVE_ADDRESS + archive_length - 0x44000000
+    fdt = replace_once(fdt, "#2038", f"#{archive_length}", 2)
+    fdt = replace_once(fdt, "initrd=0x44000000,0x3edfe1 panic=1 ",
+                       f"initrd=0x44000000,0x{end:x} panic=1 ")
+    (source / "fdt_initrd.S").write_text(fdt)
+    return source
+
+
 def check_layout(payload: dict[str, bytes]) -> None:
+    image = payload["fdt_initrd.bin"]
+    archive = payload["initramfs_overlay.cpio.gz"]
+    if len(image) > 3072 or not 0 < len(archive) <= 2048:
+        raise ValueError("FDT shim or compressed initramfs exceeds the 3072-byte LK cave")
     regions = (
         (0x201000, payload["preloader_patched.bin"]),
         (0x226000, payload["lk_bridge.bin"]),
@@ -202,13 +257,12 @@ def check_layout(payload: dict[str, bytes]) -> None:
         if padded_end > 0x238000 or (index + 1 < len(regions) and
                                       padded_end > regions[index + 1][0]):
             raise ValueError(f"SRAM staging overlap at 0x{address:x}")
-    image = payload["fdt_initrd.bin"]
-    archive = payload["initramfs_overlay.cpio.gz"]
-    if (image[984:1024] != bytes(40) or image[1024:1024 + len(archive)] != archive or
+    end = ARCHIVE_ADDRESS + len(archive) - 0x44000000
+    if (image[984:1024] != bytes(40) or
+            image[1024:1024 + len(archive)] != archive or
             image.count(archive) != 1 or
-            image.count(b"initrd=0x44000000,0x3edfe1 panic=1 ") != 1 or
-            ARCHIVE_ADDRESS + len(archive) != 0x443EDFE1):
-        raise ValueError("embedded archive or fixed FDT replacement changed")
+            image.count(f"initrd=0x44000000,0x{end:x} panic=1 ".encode()) != 1):
+        raise ValueError("embedded archive or FDT replacement changed")
 
 
 def build(args: argparse.Namespace) -> None:
@@ -243,36 +297,46 @@ def build(args: argparse.Namespace) -> None:
     payload: dict[str, bytes] = {}
     with tempfile.TemporaryDirectory() as folder:
         temp = Path(folder)
-        elf = check_output(build_init(temp, args.clang, args.ld), "init.elf")
+        elf = build_init(temp, args.clang, args.ld, args.objcopy)
+        check_init_elf(elf)
+        print(f"BUILD_LAYOUT_OK init.elf bytes={len(elf)} sha256={sha(elf)}")
         archive = gzip.compress(
             newc_entry("init", elf, 0o100755, 270) +
             newc_entry("sbin", b"", 0o040755, 271) +
             newc_entry("sbin/multi_init", b"../init", 0o120777, 272) +
             newc_entry("TRAILER!!!", b"", 0, 273), compresslevel=9, mtime=0)
         # zlib versions disagree about the GZIP OS byte. Use the portable
-        # value so the pinned payload is identical on supported Python builds.
+        # value so the payload is identical on supported Python builds.
         if archive[:3] != b"\x1f\x8b\x08" or archive[4:8] != b"\x00" * 4:
             raise RuntimeError("unexpected GZIP header")
         archive = archive[:9] + b"\xff" + archive[10:]
+        if len(archive) > 2048:
+            raise ValueError(
+                f"compressed initramfs is {len(archive)} bytes; the FDT payload space is 2048 bytes")
         payload["init.elf"] = elf
-        payload["initramfs_overlay.cpio.gz"] = check_output(archive, "initramfs_overlay.cpio.gz")
+        payload["initramfs_overlay.cpio.gz"] = archive
+        print(f"BUILD_LAYOUT_OK initramfs_overlay.cpio.gz bytes={len(archive)} sha256={sha(archive)}")
         after = cpio_entries(gzip.decompress(stock_ramdisk + archive))
         if after != {**stock_files, "init": elf, "sbin/multi_init": b"../init"}:
             raise ValueError("overlay changes another stock initramfs member")
         (temp / "initramfs_overlay.cpio.gz").write_bytes(archive)
+        source = variant_fdt_sources(temp, len(archive))
         for name, target, address in (
             ("preloader_snapshot", "armv7a-none-eabi", 0x227000),
             ("lk_bridge", "armv7a-none-eabi", 0x226000),
             ("handoff_cave", "armv7a-none-eabi", 0x41E24500),
-            ("fdt_initrd", "aarch64-none-elf", 0x41E32000),
         ):
             binary_name = name + ".bin"
             payload[binary_name] = check_output(
                 build_assembly(temp, name, target, address,
                                args.clang, args.ld, args.objcopy), binary_name)
+        fdt = build_assembly(temp, "fdt_initrd", "aarch64-none-elf", 0x41E32000,
+                             args.clang, args.ld, args.objcopy, source)
+        payload["fdt_initrd.bin"] = fdt
+        print(f"BUILD_LAYOUT_OK fdt_initrd.bin bytes={len(fdt)} sha256={sha(fdt)}")
     payload["preloader_patched.bin"] = patch_preloader(preloader)
     check_layout(payload)
-    print("OFFLINE_BOOTSTRAP_PREFLIGHT_OK: all checked artifacts match the tested research build")
+    print("OFFLINE_BOOTSTRAP_PREFLIGHT_OK: pinned artifacts match and the host-built bootstrap fits its fixed bounds")
     args.out.mkdir(parents=True, exist_ok=True)
     for name, data in payload.items():
         (args.out / name).write_bytes(data)
