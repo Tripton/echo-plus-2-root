@@ -3,7 +3,9 @@
 #include <stdio.h>
 #include <unistd.h>
 
+#ifndef POLICY_SIZE
 #define POLICY_SIZE 363124
+#endif
 static unsigned char policy[POLICY_SIZE];
 
 int main(void) {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Root the tested Echo Plus 2 using the checked, guided release stages."""
+"""Root an Echo Plus 2 using exact-image, guarded firmware stages."""
 
 import argparse
 import hashlib
@@ -13,12 +13,16 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 
 import configure_gate
 
 
 ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / "src/bootstrap"))
+from firmware_profiles import NS6575_8338N, PROFILES, by_name
 # Everything created by this guide stays in one Git-ignored tree. Source and
 # captures can then travel together without adding device data to a commit.
 LOCAL = ROOT / "local"
@@ -31,13 +35,37 @@ MTK_ROOT = LOCAL / "tools/mtkclient"
 # These are compatibility pins for the one measured firmware and upstream
 # tool revision, not user settings. Stop on a mismatch before writing /data.
 MTKCLIENT_COMMIT = "7cb40e727727dfe3faa065eefb29b16ed29bbdf1"
-FINGERPRINT = "Amazon/lidar/lidar:6.0/NS6575/8338N:user/amz-p,release-keys"
 FULL_CAPS = "0000003fffffffff"
 START = time.monotonic()
 
 
 def phase(label: str) -> None:
     print(f"\n[{time.strftime('%H:%M:%S')} +{time.monotonic() - START:.0f}s] {label}", flush=True)
+
+
+def report_source_revision() -> None:
+    """Identify the source checkout in logs before any host or device work."""
+    try:
+        top = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=15)
+        if top.returncode != 0 or Path(top.stdout.strip()).resolve() != ROOT:
+            print("REPO_COMMIT unavailable tracked_changes=unknown", flush=True)
+            return
+        commit = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "--verify", "HEAD"],
+            capture_output=True, text=True, timeout=15)
+        changes = subprocess.run(
+            ["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        print("REPO_COMMIT unavailable tracked_changes=unknown", flush=True)
+        return
+    if commit.returncode != 0 or changes.returncode != 0:
+        print("REPO_COMMIT unavailable tracked_changes=unknown", flush=True)
+        return
+    print(f"REPO_COMMIT {commit.stdout.strip()} "
+          f"tracked_changes={'yes' if changes.stdout else 'no'}", flush=True)
 
 
 def call(*parts: object, env: dict[str, str] | None = None, capture: bool = False) -> str:
@@ -90,6 +118,60 @@ def state_path(private: Path) -> Path:
 def read_state(private: Path) -> dict[str, str]:
     path = state_path(private)
     return json.loads(path.read_text()) if path.exists() else {}
+
+
+def selected_firmware(state: dict[str, str]):
+    """Resolve the saved exact image and its independent physical slot."""
+    marker = state.get("firmware_profile", "NS6575-8338N a")
+    parts = marker.split()
+    if len(parts) == 1 and parts[0] == NS6575_8338N.name:
+        parts.append("a")  # Private state from the original single-slot guide.
+    if len(parts) != 2 or parts[1] not in ("a", "b"):
+        raise RuntimeError("Saved firmware profile or slot is malformed; rebuild from dump")
+    return by_name(parts[0]), parts[1]
+
+
+def parse_recovery_firmware(mounts: str, properties: list[str], symbols: str):
+    """Identify the running stock system and kernel in the USB RAM recovery."""
+    mounted = re.findall(r"(?m)^/dev/mmcblk0p(13|14) /system_root ext4 ro,", mounts)
+    if len(mounted) != 1:
+        raise RuntimeError("Could not identify one read-only active system slot")
+    slot = {"13": "a", "14": "b"}[mounted[0]]
+    fingerprints = set()
+    for content in properties:
+        fingerprints.update(re.findall(r"(?m)^ro\.build\.fingerprint=([^\r\n]+)$", content))
+    if len(fingerprints) != 1:
+        raise RuntimeError("Mounted stock system has no unique build fingerprint")
+    matches = [profile for profile in PROFILES if profile.fingerprint in fingerprints]
+    if len(matches) != 1:
+        raise RuntimeError("Mounted stock system has an unsupported build fingerprint")
+    profile = matches[0]
+    addresses = re.findall(r"(?m)^([0-9a-f]{16}) [tT] sel_read_enforce$", symbols)
+    if addresses != [f"{profile.sel_read_enforce:016x}"]:
+        raise RuntimeError("Running kernel differs from the mounted stock system profile")
+    return profile, slot
+
+
+def recovery_firmware():
+    mounts = adb("shell", "cat /proc/mounts")
+    properties = []
+    for path in ("/system_root/system/build.prop", "/system_root/build.prop"):
+        try:
+            properties.append(adb("exec-out", "cat", path))
+        except subprocess.CalledProcessError:
+            continue
+    symbols = adb("exec-out", "cat", "/proc/kallsyms")
+    return parse_recovery_firmware(mounts, properties, symbols)
+
+
+def stock_firmware():
+    """Identify the same boot after a completed stock-init handoff."""
+    fingerprint = adb("shell", "getprop ro.build.fingerprint").strip()
+    suffix = adb("shell", "getprop ro.boot.slot_suffix").strip()
+    matches = [profile for profile in PROFILES if profile.fingerprint == fingerprint]
+    if len(matches) != 1 or suffix not in ("_a", "_b"):
+        raise RuntimeError("Stock Android has an unsupported fingerprint or boot slot")
+    return matches[0], suffix[1]
 
 
 def save_state(private: Path, state: dict[str, str]) -> None:
@@ -187,12 +269,17 @@ def prompt_cycle() -> None:
 def dump(args: argparse.Namespace, private: Path, tools: dict[str, object]) -> None:
     state = read_state(private)
     if args.reuse:
-        if not state.get("meid_sha256"):
-            raise RuntimeError("No saved device hash. Run dump without --reuse first")
         phase("Checking the saved device dump")
         call(tools["python"], ROOT / "src/bootstrap/capture.py",
              "--mtkclient-root", tools["mtk"], "--output-dir", private,
              "--verify-captures")
+        if not state.get("meid_sha256"):
+            report = json.loads((private / "capture-report.json").read_text())
+            meid_hash = report.get("meid_sha256", "")
+            if not re.fullmatch(r"[0-9a-f]{64}", meid_hash):
+                raise RuntimeError("Verified capture has no usable device hash")
+            state["meid_sha256"] = meid_hash
+            save_state(private, state)
     else:
         prompt_cycle()
         phase("Reading and checking this Echo's firmware")
@@ -215,12 +302,30 @@ def dump(args: argparse.Namespace, private: Path, tools: dict[str, object]) -> N
     call(tools["python"], ROOT / "src/bootstrap/build.py",
          "--preloader", private / "preloader-from-sram.bin",
          "--lk-a", private / "lk_a.bin", "--lk-b", private / "lk_b.bin",
-         "--boot-a", private / "boot_a-live.bin", "--stage1", tools["stage1"],
+         "--boot-a", private / "boot_a-live.bin",
+         "--boot-b", private / "boot_b-live.bin",
+         "--misc", private / "misc-window.bin", "--stage1", tools["stage1"],
          "--clang", tools["clang"], "--ld", tools["ld"],
          "--objcopy", tools["objcopy"], "--out", BOOT_BUILD)
+    profile = (BOOT_BUILD / "firmware-profile.txt").read_text().strip()
+    state["firmware_profile"] = profile
     state["capture_ready"] = "yes"
     save_state(private, state)
-    print("DUMP_AND_RAM_IMAGE_READY. Next: python3 echo_plus2.py boot", flush=True)
+    if profile != "NS6575-8338N a":
+        print(f"EXPERIMENTAL_RAM_IMAGE_READY: {profile} has passed offline checks but no device boot test", flush=True)
+        print("Next: python3 echo_plus2.py boot", flush=True)
+    else:
+        print("DUMP_AND_RAM_IMAGE_READY. Next: python3 echo_plus2.py boot", flush=True)
+
+
+def diagnose_firmware(private: Path, tools: dict[str, object]) -> None:
+    output = Path(tempfile.mkdtemp(prefix="diagnostic-", dir=private))
+    prompt_cycle()
+    phase("Reading this Echo's firmware for offset analysis")
+    call(tools["python"], ROOT / "src/bootstrap/capture.py",
+         "--mtkclient-root", tools["mtk"], "--output-dir", output,
+         "--diagnose", "--run")
+    print(f"DIAGNOSTIC_FILES_READY: {output}", flush=True)
 
 
 def adb(*parts: str, capture_output: bool = True) -> str:
@@ -234,13 +339,93 @@ def usb_serial_from_cmdline() -> str:
         raise RuntimeError("USB Echo kernel identity is missing or differs")
     serial = match.group(1)
     reported = adb("get-serialno").strip()
-    # The RAM recovery deliberately clears the USB gadget serial, so recent
-    # adb clients report their "unknown" placeholder instead of an empty
-    # string. That placeholder is not a serial; a genuinely different serial
-    # from another connected device must still fail this check.
-    if reported and reported != "unknown" and reported != serial:
-        raise RuntimeError("USB ADB and kernel serials differ")
+    if reported and reported != serial:
+        # Our RAM init leaves the USB gadget iSerial blank. Linux ADB may
+        # report a transport identifier instead of the kernel's device serial.
+        print("RECOVERY_ADB_TRANSPORT_SERIAL_DIFFERS: checking kernel identity",
+              flush=True)
     return serial
+
+
+def stock_usb_serial() -> str:
+    if adb("get-state").strip() != "device":
+        raise RuntimeError("Stock Android USB ADB is not ready")
+    serial = adb("get-serialno").strip()
+    if (not serial or serial != adb("shell", "getprop ro.serialno").strip() or
+            adb("shell", "getprop ro.boot.hardware").strip() != "mt8167"):
+        raise RuntimeError("Stock Android USB identity differs")
+    return serial
+
+
+def parse_ioreg_mtk_devices(output: str) -> tuple[str, ...]:
+    """Extract MediaTek USB identities without logging other USB devices."""
+    devices = []
+    properties = {}
+
+    def collect() -> None:
+        if properties.get("idVendor") == "3725" and "idProduct" in properties:
+            product = int(properties["idProduct"])
+            session = properties.get("sessionID", "unknown")
+            devices.append(f"0e8d:{product:04x} session={session}")
+
+    for line in output.splitlines():
+        if line.lstrip().startswith("+-o "):
+            collect()
+            properties = {}
+        match = re.search(r'"(idVendor|idProduct|sessionID)"\s*=\s*(\d+)', line)
+        if match:
+            properties[match.group(1)] = match.group(2)
+    collect()
+    return tuple(sorted(devices))
+
+
+def mtk_usb_snapshot(root: Path = Path("/sys/bus/usb/devices")) -> tuple[str, ...] | None:
+    """Observe USB enumeration only; a VID:PID does not prove an Echo identity."""
+    if platform.system() == "Linux":
+        if not root.is_dir():
+            return None
+        devices = []
+        try:
+            for entry in root.iterdir():
+                vendor = entry / "idVendor"
+                product = entry / "idProduct"
+                if not vendor.is_file() or not product.is_file():
+                    continue
+                try:
+                    if vendor.read_text().strip().lower() != "0e8d":
+                        continue
+                    pid = product.read_text().strip().lower()
+                    number = (entry / "devnum").read_text().strip()
+                except OSError:
+                    continue  # A device may disappear during enumeration.
+                devices.append(f"0e8d:{pid} port={entry.name} devnum={number}")
+        except OSError:
+            return None
+        return tuple(sorted(devices))
+    if platform.system() == "Darwin":
+        try:
+            result = subprocess.run(
+                ["/usr/sbin/ioreg", "-p", "IOUSB", "-r", "-c", "IOUSBHostDevice",
+                 "-l", "-w", "0"], capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return parse_ioreg_mtk_devices(result.stdout) if result.returncode == 0 else None
+    return None
+
+
+def watch_mtk_usb(stop: threading.Event) -> None:
+    started = time.monotonic()
+    previous = None
+    while not stop.is_set():
+        snapshot = mtk_usb_snapshot()
+        if snapshot is None:
+            print("USB_TIMELINE_UNAVAILABLE", flush=True)
+            return
+        if snapshot != previous:
+            print(f"USB_TIMELINE +{time.monotonic() - started:.1f}s "
+                  f"{', '.join(snapshot) if snapshot else 'none'}", flush=True)
+            previous = snapshot
+        stop.wait(0.5)
 
 
 def wait_recovery(expected_serial: str | None) -> str:
@@ -299,6 +484,10 @@ def boot(private: Path, tools: dict[str, object], *, resume: bool = False) -> No
     state = read_state(private)
     if state.get("capture_ready") != "yes" or not state.get("meid_sha256"):
         raise RuntimeError("Run python3 echo_plus2.py dump before boot")
+    built_marker = BOOT_BUILD / "firmware-profile.txt"
+    expected_profile = state.get("firmware_profile", "NS6575-8338N")
+    if built_marker.exists() and built_marker.read_text() != expected_profile + "\n":
+        raise RuntimeError("Saved Echo profile differs from the built RAM image; rebuild from its dump")
     phase("Checking the RAM image before touching the Echo")
     runner = [tools["python"], ROOT / "src/bootstrap/run.py",
               "--mtkclient-root", tools["mtk"], "--stage1", tools["stage1"],
@@ -306,13 +495,21 @@ def boot(private: Path, tools: dict[str, object], *, resume: bool = False) -> No
               "--built-dir", BOOT_BUILD]
     call(*runner)
     use_sdk_platform_tools(detect_sdk())
-    if resume:
-        phase("Resuming the running USB recovery after an interrupted guide")
-    else:
+    if not resume:
         prompt_cycle()
-        phase("Starting temporary root from RAM")
-        call(*runner, "--run")
-    serial = wait_recovery(state.get("usb_serial"))
+    usb_stop = threading.Event()
+    usb_thread = threading.Thread(target=watch_mtk_usb, args=(usb_stop,), daemon=True)
+    usb_thread.start()
+    try:
+        if resume:
+            phase("Resuming the running USB recovery after an interrupted guide")
+        else:
+            phase("Starting temporary root from RAM")
+            call(*runner, "--run")
+        serial = wait_recovery(state.get("usb_serial"))
+    finally:
+        usb_stop.set()
+        usb_thread.join(timeout=6)
     if state.get("usb_serial") and state["usb_serial"] != serial:
         raise RuntimeError("Recovery serial differs from the saved target")
     state["usb_serial"] = serial
@@ -320,7 +517,10 @@ def boot(private: Path, tools: dict[str, object], *, resume: bool = False) -> No
     if not re.fullmatch(r"[0-9a-f-]{36}", state["recovery_boot_id"]):
         raise RuntimeError("Could not identify this temporary recovery boot")
     save_state(private, state)
-    print("TEMPORARY_ROOT_READY. Next: persist for initial setup, or recover-root to rearm a spent attempt", flush=True)
+    if expected_profile not in ("NS6575-8338N", "NS6575-8338N a"):
+        print("EXPERIMENTAL_RAM_RECOVERY_READY. Next: persist to test cold-boot root", flush=True)
+    else:
+        print("TEMPORARY_ROOT_READY. Next: persist for initial setup, or recover-root to rearm a spent attempt", flush=True)
 
 
 def recover_root(private: Path) -> None:
@@ -390,9 +590,29 @@ def persist(private: Path, tools: dict[str, object], *, resume_stock: bool = Fal
     # Reuse the recovery started by `boot`. A new BootROM cycle would make a
     # stale install state easy to mistake for the same running device.
     phase("Checking the selected Echo and boot session")
-    serial = usb_serial_from_cmdline() if resume_stock else wait_recovery(state["usb_serial"])
+    serial = stock_usb_serial() if resume_stock else wait_recovery(state["usb_serial"])
     if serial != state["usb_serial"] or adb("shell", "cat /proc/sys/kernel/random/boot_id").strip() != state["recovery_boot_id"]:
         raise RuntimeError("Temporary recovery has restarted; run boot again")
+    profile, slot = stock_firmware() if resume_stock else recovery_firmware()
+    detected = f"{profile.name} {slot}"
+    print(f"RECOVERY_FIRMWARE_PROFILE {profile.name} slot {slot.upper()}", flush=True)
+    built_marker = BOOT_BUILD / "firmware-profile.txt"
+    if not built_marker.is_file() or built_marker.read_text() != detected + "\n":
+        raise RuntimeError("Running firmware differs from the RAM image; rebuild from this Echo's dump")
+    if state.get("firmware_profile") and selected_firmware(state) != (profile, slot):
+        raise RuntimeError("Saved firmware profile differs from the running Echo; rebuild from its dump")
+    state["firmware_profile"] = detected
+    save_state(private, state)
+    key_private = Path.home() / ".android/adbkey"
+    key_public = Path.home() / ".android/adbkey.pub"
+    if not key_private.is_file() or not key_public.is_file():
+        raise RuntimeError(
+            "This host needs an ADB key pair before persist. If neither file exists, "
+            "run `mkdir -p ~/.android && adb keygen ~/.android/adbkey && adb kill-server`, then retry. "
+            "If one file exists, restore its matching pair instead of replacing it")
+    public_copy = private / "adbkey.pub"
+    if public_copy.exists() and public_copy.read_bytes() != key_public.read_bytes():
+        raise RuntimeError("Saved ADB public key differs from this host")
     sdk = Path(tools["sdk"])
     env = os.environ.copy()
     env["ANDROID_SDK_ROOT"] = str(sdk)
@@ -440,17 +660,12 @@ def persist(private: Path, tools: dict[str, object], *, resume_stock: bool = Fal
                              ("/system_root/init.mt8167.usb.rc", "init.mt8167.usb.rc"),
                              ("/system_root/init.usb.rc", "init.usb.rc")):
             save_recovery_file(remote, stock / name)
-    key_public = Path.home() / ".android/adbkey.pub"
-    if not key_public.is_file():
-        raise RuntimeError("Missing this host's existing ADB public key")
-    public_copy = private / "adbkey.pub"
-    if public_copy.exists() and public_copy.read_bytes() != key_public.read_bytes():
-        raise RuntimeError("Saved ADB public key differs from this host")
     public_copy.write_bytes(key_public.read_bytes())
     call(tools["python"], ROOT / "src/bootstrap/stock-transition/build.py",
          "--policy", stock / "sepolicy", "--stock-usb-rc", stock / "init.mt8167.usb.rc",
          "--generic-usb-rc", stock / "init.usb.rc", "--clang", tools["clang"],
-         "--ld", tools["ld"], "--policy-cc", tools["ndk_cc"], "--out", STOCK_BUILD)
+         "--ld", tools["ld"], "--policy-cc", tools["ndk_cc"], "--out", STOCK_BUILD,
+         "--profile", profile.name)
     base = [tools["python"], ROOT / "src/bootstrap/stock-transition/install.py",
             "--policy", stock / "sepolicy", "--stock-usb-rc", stock / "init.mt8167.usb.rc",
             "--generic-usb-rc", stock / "init.usb.rc", "--apk", apk,
@@ -459,7 +674,8 @@ def persist(private: Path, tools: dict[str, object], *, resume_stock: bool = Fal
             "--apk-sha256", sha(apk), "--adb-pubkey", public_copy,
             "--aapt", sdk / "build-tools/36.0.0/aapt",
             "--apksigner", sdk / "build-tools/36.0.0/apksigner",
-            "--target-serial", serial]
+            "--target-serial", serial, "--profile", profile.name,
+            "--slot", slot]
     call(*base)
     phase("Installing and arming cold-boot root")
     call(*base, "--resume-stock" if resume_stock else "--run")
@@ -475,6 +691,7 @@ def persist(private: Path, tools: dict[str, object], *, resume_stock: bool = Fal
 def verify(private: Path) -> None:
     use_sdk_platform_tools(detect_sdk())
     state = read_state(private)
+    profile, slot = selected_firmware(state)
     if not all(state.get(key) for key in ("installed_apk_sha256", "usb_serial", "install_boot_id")):
         raise RuntimeError("No completed install is recorded in the private setup state")
     print("Waiting up to 360 seconds for the normally booted Echo over USB ADB...", flush=True)
@@ -521,10 +738,10 @@ def verify(private: Path) -> None:
         time.sleep(2)
     if adb("shell", "cat /proc/sys/kernel/random/boot_id").strip() == state["install_boot_id"]:
         raise RuntimeError("The Echo has not restarted since installation")
-    if adb("shell", "getprop ro.build.fingerprint").strip() != FINGERPRINT:
+    if adb("shell", "getprop ro.build.fingerprint").strip() != profile.fingerprint:
         raise RuntimeError("Stock firmware differs from the supported build")
-    if adb("shell", "getprop ro.boot.slot_suffix").strip() != "_a":
-        raise RuntimeError("Stock Android is not running the checked boot_a slot")
+    if adb("shell", "getprop ro.boot.slot_suffix").strip() != "_" + slot:
+        raise RuntimeError("Stock Android is not running the selected boot slot")
     # USB ADB can appear before Android finishes starting. A check launched as
     # soon as the cable reconnects should wait for the completed stock boot.
     deadline = time.monotonic() + 180
@@ -570,19 +787,22 @@ def verify(private: Path) -> None:
             f"CapBnd:\t{FULL_CAPS}" not in capabilities or
             "BRIDGE_EXIT=0" not in capabilities):
         raise RuntimeError("The current-boot root helper lacks UID 0 or full capabilities")
-    print("COLD_BOOT_ROOT_OBSERVED on the tested stock firmware", flush=True)
+    print(f"COLD_BOOT_ROOT_OBSERVED on {profile.name} slot {slot.upper()}", flush=True)
 
 
 def verify_usb_identity(private: Path) -> None:
     """Check the selected stock Echo without needing the short-lived root broker."""
-    serial = read_state(private).get("usb_serial")
+    state = read_state(private)
+    profile, slot = selected_firmware(state)
+    serial = state.get("usb_serial")
     if not serial:
         raise RuntimeError("No installed Echo is recorded in local/device")
     if (adb("get-state").strip() != "device" or
             adb("get-serialno").strip() != serial or
             adb("shell", "getprop", "ro.serialno").strip() != serial or
             adb("shell", "getprop", "ro.boot.hardware").strip() != "mt8167" or
-            adb("shell", "getprop", "ro.build.fingerprint").strip() != FINGERPRINT):
+            adb("shell", "getprop", "ro.build.fingerprint").strip() != profile.fingerprint or
+            adb("shell", "getprop", "ro.boot.slot_suffix").strip() != "_" + slot):
         raise RuntimeError("USB ADB does not identify as the installed Echo Plus 2")
 
 
@@ -596,6 +816,7 @@ def main() -> None:
     commands.add_parser("check", help="check local dependencies without device access")
     dump_parser = commands.add_parser("dump", help="read and check this Echo's firmware, then build its RAM image")
     dump_parser.add_argument("--reuse", action="store_true", help="verify prior capture and rebuild offline")
+    commands.add_parser("diagnose", help="read another firmware for offset analysis without building a RAM image")
     boot_parser = commands.add_parser("boot", help="boot temporary root from RAM")
     boot_parser.add_argument("--resume", action="store_true",
                              help="adopt the current USB recovery after an interrupted boot command")
@@ -611,6 +832,7 @@ def main() -> None:
     status_parser.add_argument("--config", type=Path, default=LOCAL / "config.toml")
     commands.add_parser("kiosk-setup", help="start installed Kiosk Satellite and forward its setup page over USB")
     args = parser.parse_args()
+    report_source_revision()
     if args.stage == "check":
         host(args, android=True)
         print("HOST_PREFLIGHT_OK", flush=True)
@@ -640,6 +862,8 @@ def main() -> None:
         recover_root(private)
         return
     if args.stage in {"configure", "gate-status"}:
+        if selected_firmware(read_state(private)) != (NS6575_8338N, "a"):
+            raise RuntimeError("The optional WiFi gate is device-tested only on NS6575/8338N slot A")
         sdk = detect_sdk()
         use_sdk_platform_tools(sdk)
         if args.stage == "configure":
@@ -657,6 +881,8 @@ def main() -> None:
     print("HOST_PREFLIGHT_OK", flush=True)
     if args.stage == "dump":
         dump(args, private, tools)
+    elif args.stage == "diagnose":
+        diagnose_firmware(private, tools)
     elif args.stage == "boot":
         boot(private, tools, resume=args.resume)
     elif args.stage == "persist":

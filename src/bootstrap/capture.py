@@ -22,6 +22,7 @@ import zlib
 from pathlib import Path
 
 from build import PINNED
+from firmware_profiles import PROFILES, active_slot, select_profile
 
 
 SECTOR = 512
@@ -32,7 +33,7 @@ SRAM_END = 0x238000
 PRELOADER_MAGIC = bytes.fromhex("4d4d4d0138000000")
 LOADER_SHA256 = "aef234190ccb8145d2e3b8459741e9adb70f2caa8481aa216c1b25152afaca1f"
 PAYLOAD_SHA256 = "7bf98fa19b32eab41cf26578fe5017b3e277efa22f49e134ed4192c4634c8ecf"
-TESTED_MTKCLIENT_REVISION = "7cb40e727727dfe3faa065eefb29b16ed29bbdf1"
+PINNED_MTKCLIENT_REVISION = "7cb40e727727dfe3faa065eefb29b16ed29bbdf1"
 EMI_SHA256 = "5132f9585472038b15ecdb5c3158a5823ee8fceb709bd0d098e0eecd9f4f2d8d"
 DA2_SHA256 = "3f64ded6c216ce8d79d9d41c5cce18ac54ecb100d44152beff1af75602359630"
 PARTITIONS = {
@@ -62,7 +63,7 @@ def local_inputs(mtk_root: Path) -> tuple[Path, Path]:
     untracked = subprocess.check_output(
         ["git", "-C", str(mtk_root), "ls-files", "--others", "--exclude-standard",
          "--", "mtkclient"], text=True).strip()
-    if revision != TESTED_MTKCLIENT_REVISION or dirty != 0 or untracked:
+    if revision != PINNED_MTKCLIENT_REVISION or dirty != 0 or untracked:
         raise RuntimeError("MTKClient source differs from the tested revision")
     loader = mtk_root / "mtkclient/Loader/MTK_DA_V5.bin"
     payload = mtk_root / "mtkclient/payloads/mt8167_payload.bin"
@@ -100,13 +101,25 @@ def capture_preloader(mtk, output: Path) -> bytes:
     data = read_sram(mtk, address, padded_length)[:length]
     if data != read_sram(mtk, address, padded_length)[:length]:
         raise RuntimeError("SRAM preloader changed between reads")
-    if data[:8] != PRELOADER_MAGIC or struct.unpack_from("<I", data, 0x20)[0] != length:
+    if (data[:8] != PRELOADER_MAGIC or
+            struct.unpack_from("<I", data, 0x1c)[0] != address or
+            struct.unpack_from("<I", data, 0x20)[0] != length):
         raise RuntimeError("SRAM preloader header changed during capture")
     path = output / "preloader-from-sram.bin"
     save_new_or_equal(path, data)
     print(f"CHECKPOINT_CAPTURE_PRELOADER_SAVED address=0x{address:x} "
           f"bytes={length} sha256={sha(data)}", flush=True)
     return data
+
+
+def check_preloader_for_capture(data: bytes, diagnostic: bool) -> None:
+    observed = (len(data), sha(data))
+    if diagnostic:
+        print(f"CHECKPOINT_DIAGNOSTIC_PRELOADER_SAVED bytes={observed[0]} sha256={observed[1]}", flush=True)
+    else:
+        if not any(profile.preloader == observed for profile in PROFILES):
+            raise RuntimeError("Preloader saved, but this firmware has no checked RAM profile")
+        print("CHECKPOINT_CAPTURE_PRELOADER_OK; active slot pending", flush=True)
 
 
 def read_twice(mtk, offset: int, length: int) -> bytes:
@@ -175,7 +188,7 @@ def parse_gpt(window: bytes, window_offset: int, header_offset: int) -> tuple[di
     return info, parts
 
 
-def check_gpt(primary: bytes, backup: bytes) -> dict:
+def check_gpt(primary: bytes, backup: bytes, *, require_layout: bool = True) -> dict:
     if len(primary) != WINDOW or len(backup) != WINDOW:
         raise RuntimeError("GPT read-window size differs")
     last_lba = USER_BYTES // SECTOR - 1
@@ -187,34 +200,18 @@ def check_gpt(primary: bytes, backup: bytes) -> dict:
             first["entries_crc32"] != last["entries_crc32"] or
             first_parts != last_parts):
         raise RuntimeError("GPT primary and backup disagree")
-    for name, (expected_lba, size, _) in PARTITIONS.items():
-        if first_parts.get(name) != (expected_lba, size):
-            raise RuntimeError(f"GPT layout differs for {name}")
-    if first_parts.get("misc") != (51200, 524288):
-        raise RuntimeError("GPT misc partition differs")
-    print("CHECKPOINT_CAPTURE_GPT_CRC_AND_LAYOUT_OK", flush=True)
+    if require_layout:
+        for name, (expected_lba, size, _) in PARTITIONS.items():
+            if first_parts.get(name) != (expected_lba, size):
+                raise RuntimeError(f"GPT layout differs for {name}")
+        if first_parts.get("misc") != (51200, 524288):
+            raise RuntimeError("GPT misc partition differs")
+    print("CHECKPOINT_CAPTURE_GPT_CRC_AND_LAYOUT_OK" if require_layout
+          else "CHECKPOINT_DIAGNOSTIC_GPT_CRC_OK", flush=True)
     return {"user_bytes": USER_BYTES, "disk_guid": first["disk_guid"],
             "primary_sha256": sha(primary), "backup_sha256": sha(backup),
             "partitions": {name: {"lba": lba, "bytes": size}
                            for name, (lba, size) in first_parts.items()}}
-
-
-def check_active_a(misc: bytes) -> None:
-    # The observed bytes match the older boot_ctrl layout in misc's
-    # slot_suffix field:
-    # magic, version, then one priority/tries/success byte for each slot.
-    # Slot A has changed from 00 to 8f on this unit after an A/B transition,
-    # so checking a single eight-byte snapshot would reject a valid capture.
-    # Accept A only when it is bootable and has strictly greater priority
-    # than B. A tie is ambiguous and must be resolved before using boot_a.
-    if len(misc) != 4096 or misc[0x360:0x365] != bytes.fromhex("0041424201"):
-        raise RuntimeError("A/B slot record has unknown magic or version")
-    a, b = misc[0x365:0x367]
-    a_priority, b_priority = a & 0x0f, b & 0x0f
-    a_bootable = a_priority > 0 and (a & 0x80 or (a >> 4) & 0x07)
-    if not a_bootable or a_priority <= b_priority:
-        raise RuntimeError("A/B slot record does not establish bootable active A")
-    print("CHECKPOINT_CAPTURE_ACTIVE_A_RECORD_OK", flush=True)
 
 
 def save_new_or_equal(path: Path, data: bytes) -> None:
@@ -248,15 +245,15 @@ def save_new_or_equal(path: Path, data: bytes) -> None:
 
 
 def verify_captures(directory: Path) -> None:
-    checked_file(directory / "preloader-from-sram.bin", *PINNED["preloader"])
-    for name in ("lk_a", "lk_b"):
-        checked_file(directory / f"{name}.bin", *PINNED[name])
-    checked_file(directory / "boot_a-live.bin", *PINNED["boot_a"])
+    slot = active_slot((directory / "misc-window.bin").read_bytes())
+    preloader = (directory / "preloader-from-sram.bin").read_bytes()
+    lk = (directory / f"lk_{slot}.bin").read_bytes()
+    boot = (directory / f"boot_{slot}-live.bin").read_bytes()
+    profile = select_profile(preloader, lk, boot)
     primary = (directory / "gpt-primary-window.bin").read_bytes()
     backup = (directory / "gpt-backup-window.bin").read_bytes()
     check_gpt(primary, backup)
-    check_active_a((directory / "misc-window.bin").read_bytes())
-    print("PREFLIGHT_CAPTURE_OUTPUTS_OK: exact supported boot inputs", flush=True)
+    print(f"PREFLIGHT_CAPTURE_OUTPUTS_OK: {profile.name} slot {slot.upper()}", flush=True)
 
 
 def capture(args: argparse.Namespace, loader: Path, payload: Path) -> None:
@@ -301,9 +298,7 @@ def capture(args: argparse.Namespace, loader: Path, payload: Path) -> None:
         mtk.config.target_config = status
         print("CAPTURE_READING_PRELOADER", flush=True)
         preloader = capture_preloader(mtk, args.output_dir)
-        if (len(preloader), sha(preloader)) != PINNED["preloader"]:
-            raise RuntimeError("Preloader saved, but this firmware is not supported by the RAM image")
-        print("CHECKPOINT_CAPTURE_PRELOADER_OK", flush=True)
+        check_preloader_for_capture(preloader, args.diagnose)
 
         dc = mtk.daloader.daconfig
         entry = dc.setup()
@@ -317,7 +312,7 @@ def capture(args: argparse.Namespace, loader: Path, payload: Path) -> None:
             raise RuntimeError("DA region geometry differs")
         dc.extract_emi(preloader)
         if dc.emiver != 28 or dc.emi is None or sha(dc.emi) != EMI_SHA256:
-            raise RuntimeError("preloader EMI differs")
+            raise RuntimeError("preloader DRAM/EMI setup differs; only the preloader was saved")
         mtk.daloader.set_da()
         if not mtk.daloader.da.upload_da1():
             raise RuntimeError("DA1 did not synchronize")
@@ -354,26 +349,62 @@ def capture(args: argparse.Namespace, loader: Path, payload: Path) -> None:
         output = args.output_dir
         save_new_or_equal(output / "gpt-primary-window.bin", primary)
         save_new_or_equal(output / "gpt-backup-window.bin", backup)
-        report = check_gpt(primary, backup)
+        report = check_gpt(primary, backup, require_layout=not args.diagnose)
         report["meid_sha256"] = meid_hash
-        misc = read_twice(mtk, 51200 * SECTOR, 4096)
+        if args.diagnose:
+            report["preloader_sha256"] = sha(preloader)
+        parts = report["partitions"]
+        misc_part = parts.get("misc")
+        if misc_part is None or not 4096 <= misc_part["bytes"] <= 1048576:
+            raise RuntimeError("GPT misc partition is missing or unusually sized")
+        misc = read_twice(mtk, misc_part["lba"] * SECTOR, 4096)
         save_new_or_equal(output / "misc-window.bin", misc)
-        check_active_a(misc)
+        slot = None if args.diagnose else active_slot(misc)
+        if slot is not None:
+            print(f"CHECKPOINT_CAPTURE_ACTIVE_{slot.upper()}_RECORD_OK", flush=True)
         different_images = []
-        for name, (lba, size, expected_sha) in PARTITIONS.items():
+        names = (("lk_a", "lk_b", "boot_a", "boot_b") if args.diagnose else
+                 (f"lk_{slot}", f"boot_{slot}"))
+        for name in names:
+            if args.diagnose:
+                part = parts.get(name)
+                if part is None or not 4096 <= part["bytes"] <= 16777216:
+                    raise RuntimeError(f"GPT {name} partition is missing or unusually sized")
+                lba, size = part["lba"], part["bytes"]
+                expected_sha = PARTITIONS[name][2] if name in PARTITIONS else None
+            else:
+                lba = (117760 if name == "boot_b" else
+                       18432 if name == "lk_b" else PARTITIONS[name][0])
+                size = 16777216 if name.startswith("boot_") else 1048576
+                expected_sha = None
+                if parts.get(name) != {"lba": lba, "bytes": size}:
+                    raise RuntimeError(f"GPT layout differs for {name}")
             print(f"CAPTURE_READING_{name.upper()} bytes={size} twice", flush=True)
             image = read_twice(mtk, lba * SECTOR, size)
-            filename = "boot_a-live.bin" if name == "boot_a" else f"{name}.bin"
+            filename = f"{name}-live.bin" if name.startswith("boot_") else f"{name}.bin"
             save_new_or_equal(output / filename, image)
-            if sha(image) != expected_sha:
-                different_images.append(name)
+            if args.diagnose:
+                print(f"DIAGNOSTIC_IMAGE_SAVED {name} bytes={size}", flush=True)
+                if expected_sha is not None and sha(image) != expected_sha:
+                    different_images.append(name)
             else:
-                print(f"CHECKPOINT_CAPTURE_{name.upper()}_OK bytes={size}", flush=True)
-        if different_images:
-            raise RuntimeError("Images saved but unsupported: " + ", ".join(different_images))
+                print(f"CHECKPOINT_CAPTURE_{name.upper()}_SAVED bytes={size}", flush=True)
+        profile = None
+        if not args.diagnose:
+            profile = select_profile(preloader,
+                                     (output / f"lk_{slot}.bin").read_bytes(),
+                                     (output / f"boot_{slot}-live.bin").read_bytes())
+        if args.diagnose:
+            report["diagnostic_only"] = True
+            report["images_different_from_tested_build"] = different_images
+        else:
+            report["firmware_profile"] = profile.name
         save_new_or_equal(output / "capture-report.json",
                           (json.dumps(report, indent=2) + "\n").encode())
-        print(f"CAPTURE_READY: private files saved under {output}", flush=True)
+        if args.diagnose:
+            print(f"DIAGNOSTIC_DUMP_READY: private files saved under {output}; no RAM image built", flush=True)
+        else:
+            print(f"CAPTURE_READY: private files saved under {output}", flush=True)
     finally:
         try:
             mtk.port.close()
@@ -386,6 +417,8 @@ def main() -> None:
     parser.add_argument("--mtkclient-root", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--target-meid-sha256")
+    parser.add_argument("--diagnose", action="store_true",
+                        help="read-only capture for other firmware with the checked DRAM setup")
     parser.add_argument("--verify-captures", action="store_true")
     parser.add_argument("--run", action="store_true", help="perform read-only live capture")
     args = parser.parse_args()
@@ -395,6 +428,8 @@ def main() -> None:
         raise RuntimeError("private output inside the repository must be under local/device")
     loader, payload = local_inputs(args.mtkclient_root)
     if args.verify_captures:
+        if args.diagnose:
+            raise RuntimeError("diagnostic captures cannot be used as tested boot inputs")
         verify_captures(args.output_dir)
     if not args.run:
         print("PREFLIGHT_ONLY: no USB or eMMC access", flush=True)
@@ -404,7 +439,8 @@ def main() -> None:
         raise RuntimeError("--target-meid-sha256 must be 64 lowercase hex characters")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     capture(args, loader, payload)
-    verify_captures(args.output_dir)
+    if not args.diagnose:
+        verify_captures(args.output_dir)
 
 
 if __name__ == "__main__":

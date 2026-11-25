@@ -17,11 +17,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-from build import (OUTPUTS, PINNED, SOURCE, align, check_init_elf, check_layout,
-                   cpio_entries, sha)
+from build import (OUTPUTS_BY_PROFILE_SLOT, PINNED, SOURCE, align,
+                   check_init_elf, check_layout, cpio_entries, sha)
+from firmware_profiles import NS6575_8338N, by_name
 
 
-TESTED_MTKCLIENT_REVISION = "7cb40e727727dfe3faa065eefb29b16ed29bbdf1"
+PINNED_MTKCLIENT_REVISION = "7cb40e727727dfe3faa065eefb29b16ed29bbdf1"
 STAGE_ADDRESSES = (
     (0x201000, "preloader_patched.bin"),
     (0x226000, "lk_bridge.bin"),
@@ -50,7 +51,7 @@ def preflight(args: argparse.Namespace) -> list[tuple[int, bytes, str]]:
     untracked_package_files = subprocess.check_output(
         ["git", "-C", str(args.mtkclient_root), "ls-files", "--others",
          "--exclude-standard", "--", "mtkclient"], text=True).strip()
-    if (revision != TESTED_MTKCLIENT_REVISION or dirty != 0
+    if (revision != PINNED_MTKCLIENT_REVISION or dirty != 0
             or untracked_package_files):
         raise ValueError("MTKClient source does not match the tested revision")
     stage1_size, stage1_hash = PINNED["stage1"]
@@ -58,12 +59,30 @@ def preflight(args: argparse.Namespace) -> list[tuple[int, bytes, str]]:
     if not args.stage1.resolve().is_relative_to(args.mtkclient_root.resolve()):
         raise ValueError("Stage-1 file must belong to the checked MTKClient clone")
 
-    # 2. Confirm every offline-generated file. The three host-built bootstrap
-    # files are validated structurally against their one loadable segment and
-    # the fixed memory bounds; every fixed patch stays byte-pinned. No
-    # firmware dump is read by this launcher.
+    # 2. Confirm the fixed low-level patches and validate the compiler-built
+    # init, archive and FDT shim against their actual format and memory bounds.
+    # No firmware dump is read by this launcher.
+    marker_path = args.built_dir / "firmware-profile.txt"
+    if marker_path.exists():
+        marker = marker_path.read_text()
+        if marker.count("\n") != 1 or not marker.endswith("\n"):
+            raise ValueError("RAM image profile marker is malformed")
+        parts = marker.strip().split()
+        if len(parts) == 1:
+            # Only the original 8338N A build had a verified one-field marker.
+            if parts[0] != NS6575_8338N.name:
+                raise ValueError("legacy RAM image marker has no slot; rebuild from dump")
+            parts.append("a")
+        if len(parts) != 2 or parts[1] not in ("a", "b"):
+            raise ValueError("RAM image profile marker is malformed")
+        profile = by_name(parts[0])
+        slot = parts[1]
+    else:
+        # Older, already-built 8338N directories have no marker.
+        profile = by_name("NS6575-8338N")
+        slot = "a"
     payload = {name: checked_file(args.built_dir / name, *expected)
-               for name, expected in OUTPUTS.items()}
+               for name, expected in OUTPUTS_BY_PROFILE_SLOT[profile.name, slot].items()}
     for name in ("init.elf", "initramfs_overlay.cpio.gz", "fdt_initrd.bin"):
         payload[name] = (args.built_dir / name).read_bytes()
     check_init_elf(payload["init.elf"])
@@ -74,8 +93,7 @@ def preflight(args: argparse.Namespace) -> list[tuple[int, bytes, str]]:
             "init": payload["init.elf"], "sbin": b"",
             "sbin/multi_init": b"../init"}:
         raise ValueError("bootstrap initramfs members differ")
-    check_layout(payload)
-    print(f"RAM_IMAGE_SHA256 fdt_initrd.bin={sha(payload['fdt_initrd.bin'])}", flush=True)
+    check_layout(payload, profile, slot)
     stages = []
     for address, name in STAGE_ADDRESSES:
         data = payload[name]
@@ -88,7 +106,9 @@ def preflight(args: argparse.Namespace) -> list[tuple[int, bytes, str]]:
     for (address, data, name), (next_address, _, _) in zip(stages, stages[1:]):
         if address + align(len(data), 512) > next_address:
             raise ValueError(f"SRAM staging overlap after {name}")
-    print("PREFLIGHT_BOOTSTRAP_RUN_OK: pinned payloads and SRAM layout", flush=True)
+    if args.run:
+        print(f"RAM_IMAGE_SHA256 fdt_initrd.bin={sha(payload['fdt_initrd.bin'])}", flush=True)
+    print(f"PREFLIGHT_BOOTSTRAP_RUN_OK: {profile.name} slot {slot.upper()} validated payloads and SRAM layout", flush=True)
     return stages
 
 

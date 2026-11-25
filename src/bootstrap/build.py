@@ -16,6 +16,10 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from firmware_profiles import (NS6536_2509N, NS6541_2965N,
+                               NS65741_8149N, NS6575_8338N,
+                               FirmwareProfile, active_slot, select_profile)
+
 
 SOURCE = Path(__file__).resolve().parent
 PINNED = {
@@ -25,36 +29,62 @@ PINNED = {
     "boot_a": (16777216, "3baf114f6382492e706795b229c4ff08f4fe62da6cf2172ba164830b518421b1"),
     "stage1": (1000, "0cec003fb8b594ed374270debc0aefb198d03d66d0f4ef3db5d5f1e706098296"),
 }
-# init.elf, initramfs_overlay.cpio.gz and fdt_initrd.bin embed a host-built
-# binary. Host LLVM builds of the same version only differ in nonloadable
-# metadata (compiler version strings in .comment), which the fixed 2048-byte
-# compressed archive budget cannot always absorb. Following the upstream
-# research fix, those three outputs are stripped to their loadable image and
-# checked structurally; every fixed patch below stays byte-pinned.
-OUTPUTS = {
+NS6575_8338N_SLOT_A_OUTPUTS = {
     "preloader_snapshot.bin": (184, "5e2d0711bff088738fb00935c71dd3dfa80009305cf6b12bfc5fce6a63b401c9"),
     "lk_bridge.bin": (232, "5954b8fdb2e6e2083efa17124336026f407e5ad7ac7c150c0458038cc8b6e487"),
     "handoff_cave.bin": (128, "a35e334735dfa1b566b418e18ae3c513626068dd099ce2ee048a8e4ca1074392"),
     "preloader_patched.bin": (145716, "1fd3baa00bb9a951ca3f7e5ef3a6ec4ac6d4c46696c190840814d0c04a1561c1"),
 }
+NS6541_2965N_SLOT_B_OUTPUTS = {
+    "preloader_snapshot.bin": NS6575_8338N_SLOT_A_OUTPUTS["preloader_snapshot.bin"],
+    "lk_bridge.bin": (244, "ac140e67c858d6ab496b4d1b99374bf40a2e68f818bca905012340fd3422efcc"),
+    "handoff_cave.bin": (128, "4601f9cca2c7e15b5b73d4416159532c6c5e5dec3669458ef59bd995392e85c0"),
+    "preloader_patched.bin": (144004, "49be3ad8968ecb37c2180c06e31238e8b726b0afe6caeece0058ae395749a297"),
+}
+NS6575_8338N_SLOT_B_OUTPUTS = {
+    **NS6575_8338N_SLOT_A_OUTPUTS,
+}
+NS65741_8149N_SLOT_A_OUTPUTS = {
+    **NS6575_8338N_SLOT_A_OUTPUTS,
+}
+NS65741_8149N_SLOT_B_OUTPUTS = {
+    **NS6575_8338N_SLOT_B_OUTPUTS,
+}
+NS6536_2509N_SLOT_A_OUTPUTS = {
+    **NS6541_2965N_SLOT_B_OUTPUTS,
+    "lk_bridge.bin": (244, "0f6b75770a23d97f23258edf1ce60f8ff69af00ae02fbb57b3a8bbecb37af043"),
+}
+NS6536_2509N_SLOT_B_OUTPUTS = {
+    **NS6541_2965N_SLOT_B_OUTPUTS,
+    "lk_bridge.bin": NS6536_2509N_SLOT_A_OUTPUTS["lk_bridge.bin"],
+}
+NS6541_2965N_SLOT_A_OUTPUTS = {
+    **NS6541_2965N_SLOT_B_OUTPUTS,
+}
+OUTPUTS_BY_PROFILE_SLOT = {
+    (NS6575_8338N.name, "a"): NS6575_8338N_SLOT_A_OUTPUTS,
+    (NS6575_8338N.name, "b"): NS6575_8338N_SLOT_B_OUTPUTS,
+    (NS65741_8149N.name, "a"): NS65741_8149N_SLOT_A_OUTPUTS,
+    (NS65741_8149N.name, "b"): NS65741_8149N_SLOT_B_OUTPUTS,
+    (NS6536_2509N.name, "a"): NS6536_2509N_SLOT_A_OUTPUTS,
+    (NS6536_2509N.name, "b"): NS6536_2509N_SLOT_B_OUTPUTS,
+    (NS6541_2965N.name, "a"): NS6541_2965N_SLOT_A_OUTPUTS,
+    (NS6541_2965N.name, "b"): NS6541_2965N_SLOT_B_OUTPUTS,
+}
 PRELOADER_BASE = 0x201000
 LK_BASE = 0x41E00000
-ARCHIVE_ADDRESS = 0x443ED7EB
 BOOT_IMAGE_ENTRY = 0x40080000
-RAMDISK_SIZE = 0x3ED7EB
-RAMDISK_HASH = "26f8cc663db7b0ad93776732dfde8dde14b5ed8e0a74d7eddd8e42bf370aa072"
-ADBD_HASH = "4d068fa301d85716b07623a5c112089454d70b866f29a140c3621da57d05e7ae"
 
 
 def sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def checked(path: Path, name: str) -> bytes:
+def checked(path: Path, name: str, expected: tuple[int, str] | None = None) -> bytes:
     data = path.read_bytes()
-    expected_size, expected_hash = PINNED[name]
+    expected_size, expected_hash = expected or PINNED[name]
     if len(data) != expected_size or sha(data) != expected_hash:
-        raise ValueError(f"{name}: size or SHA-256 differs from tested 8338N input")
+        raise ValueError(f"{name}: size or SHA-256 differs from the selected firmware profile")
     print(f"INPUT_OK {name} bytes={len(data)} sha256={sha(data)}")
     return data
 
@@ -123,13 +153,14 @@ def run(command: list[str], *, cwd: Path | None = None) -> None:
     subprocess.run(command, check=True, cwd=cwd)
 
 
-def build_init(temp: Path, clang: str, ld: str, objcopy: str) -> bytes:
+def build_init(temp: Path, clang: str, ld: str, objcopy: str,
+               source: Path = SOURCE) -> bytes:
     object_file = temp / "init.o"
     linked_file = temp / "init.linked.elf"
     image_file = temp / "init.elf"
     run([clang, "-target", "aarch64-none-elf", "-Oz", "-ffreestanding",
          "-fno-builtin", "-fno-stack-protector", "-fno-asynchronous-unwind-tables",
-         "-nostdlib", "-c", str(SOURCE / "init.c"), "-o", str(object_file)])
+         "-nostdlib", "-c", str(source / "init.c"), "-o", str(object_file)])
     run([ld, "-T", str(SOURCE / "init.ld"), "-z", "max-page-size=0x1000",
          "--strip-all", "-o", str(linked_file), str(object_file)])
     # The kernel's ELF loader uses program headers, not section headers.
@@ -137,27 +168,6 @@ def build_init(temp: Path, clang: str, ld: str, objcopy: str) -> bytes:
     # the fixed-size compressed initramfs space in LK.
     run([objcopy, "--strip-sections", str(linked_file), str(image_file)])
     return image_file.read_bytes()
-
-
-def build_assembly(temp: Path, name: str, target: str, address: int,
-                   clang: str, ld: str, objcopy: str, source: Path = SOURCE) -> bytes:
-    object_file = temp / f"{name}.o"
-    image_file = temp / f"{name}.elf"
-    binary_file = temp / f"{name}.bin"
-    run([clang, "-target", target, "-c", str(source / f"{name}.S"),
-         "-o", str(object_file)], cwd=temp)
-    run([ld, f"-Ttext=0x{address:x}", f"--entry=0x{address:x}",
-         "-o", str(image_file), str(object_file)])
-    run([objcopy, "-O", "binary", str(image_file), str(binary_file)])
-    return binary_file.read_bytes()
-
-
-def check_output(data: bytes, name: str) -> bytes:
-    expected_size, expected_hash = OUTPUTS[name]
-    if len(data) != expected_size or sha(data) != expected_hash:
-        raise ValueError(f"{name}: build differs from tested image")
-    print(f"BUILD_OK {name} bytes={len(data)} sha256={sha(data)}")
-    return data
 
 
 def check_init_elf(data: bytes) -> None:
@@ -181,7 +191,30 @@ def check_init_elf(data: bytes) -> None:
         raise ValueError("bootstrap init load segment changed or exceeds its bound")
 
 
-def patch_preloader(source: bytes) -> bytes:
+def build_assembly(temp: Path, name: str, target: str, address: int,
+                   clang: str, ld: str, objcopy: str, source: Path = SOURCE) -> bytes:
+    object_file = temp / f"{name}.o"
+    image_file = temp / f"{name}.elf"
+    binary_file = temp / f"{name}.bin"
+    run([clang, "-target", target, "-c", str(source / f"{name}.S"),
+         "-o", str(object_file)], cwd=temp)
+    run([ld, f"-Ttext=0x{address:x}", f"--entry=0x{address:x}",
+         "-o", str(image_file), str(object_file)])
+    run([objcopy, "-O", "binary", str(image_file), str(binary_file)])
+    return binary_file.read_bytes()
+
+
+def check_output(data: bytes, name: str, profile: FirmwareProfile = NS6575_8338N,
+                 slot: str = "a") -> bytes:
+    expected_size, expected_hash = OUTPUTS_BY_PROFILE_SLOT[profile.name, slot][name]
+    if len(data) != expected_size or sha(data) != expected_hash:
+        raise ValueError(f"{name}: build differs from checked {profile.name} image")
+    print(f"BUILD_OK {name} bytes={len(data)} sha256={sha(data)}")
+    return data
+
+
+def patch_preloader(source: bytes, profile: FirmwareProfile = NS6575_8338N,
+                    slot: str = "a") -> bytes:
     # The 0x300-byte GFH wrapper is not executed from SRAM. Check its load
     # address and declared length before taking the exact tested code body.
     if (source[:8] != bytes.fromhex("4d4d4d0138000000") or
@@ -189,58 +222,32 @@ def patch_preloader(source: bytes) -> bytes:
             struct.unpack_from("<I", source, 0x20)[0] != len(source)):
         raise ValueError("preloader GFH or load address changed")
     body = bytearray(source[0x300:])
-    if len(body) != 145716 or body[:8] != bytes.fromhex("00000000030000ea"):
+    if len(body) != profile.preloader[0] - 0x300 or body[:8] != bytes.fromhex("00000000030000ea"):
         raise ValueError("preloader entry differs")
     # Two checked call skips and one LK handoff hook. The replacement words
     # are only valid at these exact addresses on the pinned preloader.
-    patches = (
-        (0x2153D0, "2de9f34efff784ff64209a4c", "fff784ff", "00f000b8"),
-        (0x20E290, "65fc2046fff7bef9012803d1", "fff7bef9", "00f006b8"),
-        (0x20E5B4, "4ff45072fff7f0fd06f042fe", "fff7f0fd", "17f024fd"),
-    )
-    for address, context_hex, old_hex, new_hex in patches:
+    for address, context_hex, old_hex, new_hex in profile.preloader_patches:
         offset = address - PRELOADER_BASE
         context = bytes.fromhex(context_hex)
         check_bytes(body, "preloader context", context, offset - 4)
         check_bytes(body, "preloader instruction", bytes.fromhex(old_hex), offset)
         body[offset:offset + 4] = bytes.fromhex(new_hex)
-    return check_output(bytes(body), "preloader_patched.bin")
+    return check_output(bytes(body), "preloader_patched.bin", profile, slot)
 
 
-def check_lk(lk: bytes) -> None:
+def check_lk(lk: bytes, profile: FirmwareProfile = NS6575_8338N) -> None:
     def offset(address: int) -> int:
         return address - LK_BASE + 0x200
     check_bytes(lk, "LK entry", bytes.fromhex("00000fe1"), offset(0x41E00080))
-    check_bytes(lk, "LK handoff", bytes.fromhex("daf8000030b10698"), offset(0x41E1BE56))
-    check_bytes(lk, "LK Thumb cave", b"\xff" * 128, offset(0x41E24500))
+    check_bytes(lk, "LK handoff", bytes.fromhex("daf8000030b10698"), offset(profile.lk_handoff))
+    check_bytes(lk, "LK Thumb cave", b"\xff" * 128, offset(profile.thumb_cave))
     check_bytes(lk, "LK AArch64 cave", bytes(3072), offset(0x41E32000))
     if LK_BASE + len(lk) < 0x41E32000 + 3072:
         raise ValueError("LK image does not include the AArch64 cave")
 
 
-def replace_once(text: str, old: str, new: str, expected: int = 1) -> str:
-    count = text.count(old)
-    if count != expected:
-        raise ValueError(f"expected {expected} occurrences of {old!r}, found {count}")
-    return text.replace(old, new)
-
-
-def variant_fdt_sources(temp: Path, archive_length: int) -> Path:
-    """Generate an FDT shim for the actual archive size without changing tested source."""
-    if archive_length == 2038:
-        return SOURCE
-    source = temp / "variant_sources"
-    source.mkdir(exist_ok=True)
-    fdt = (SOURCE / "fdt_initrd.S").read_text()
-    end = ARCHIVE_ADDRESS + archive_length - 0x44000000
-    fdt = replace_once(fdt, "#2038", f"#{archive_length}", 2)
-    fdt = replace_once(fdt, "initrd=0x44000000,0x3edfe1 panic=1 ",
-                       f"initrd=0x44000000,0x{end:x} panic=1 ")
-    (source / "fdt_initrd.S").write_text(fdt)
-    return source
-
-
-def check_layout(payload: dict[str, bytes]) -> None:
+def check_layout(payload: dict[str, bytes], profile: FirmwareProfile = NS6575_8338N,
+                 slot: str = "a") -> None:
     image = payload["fdt_initrd.bin"]
     archive = payload["initramfs_overlay.cpio.gz"]
     if len(image) > 3072 or not 0 < len(archive) <= 2048:
@@ -257,47 +264,157 @@ def check_layout(payload: dict[str, bytes]) -> None:
         if padded_end > 0x238000 or (index + 1 < len(regions) and
                                       padded_end > regions[index + 1][0]):
             raise ValueError(f"SRAM staging overlap at 0x{address:x}")
-    end = ARCHIVE_ADDRESS + len(archive) - 0x44000000
-    if (image[984:1024] != bytes(40) or
+    end = profile.archive_address + len(archive) - 0x44000000
+    if ((profile == NS6575_8338N and slot == "a" and image[984:1024] != bytes(40)) or
             image[1024:1024 + len(archive)] != archive or
             image.count(archive) != 1 or
             image.count(f"initrd=0x44000000,0x{end:x} panic=1 ".encode()) != 1):
         raise ValueError("embedded archive or FDT replacement changed")
 
 
+def replace_once(text: str, old: str, new: str, expected: int = 1) -> str:
+    if text.count(old) != expected:
+        raise ValueError(f"bootstrap source changed around {old!r}")
+    return text.replace(old, new)
+
+
+def variant_sources(temp: Path, profile: FirmwareProfile, slot: str,
+                    archive_length: int) -> Path:
+    """Generate an isolated image/slot variant without changing tested source."""
+    if profile == NS6575_8338N and slot == "a" and archive_length == 2038:
+        return SOURCE
+    source = temp / "variant_sources"
+    source.mkdir(exist_ok=True)
+    init = (SOURCE / "init.c").read_text()
+    if profile in (NS6536_2509N, NS6541_2965N):
+        init = replace_once(init, "0xfe5bf02d", "0xfe4bf02d")
+        init = replace_once(init, "0xfe44f02d", "0xfe34f02d")
+    if slot == "b":
+        init = replace_once(init, "/dev/mmcblk0p13", "/dev/mmcblk0p14", 2)
+        init = replace_once(init, "(179 << 8) | 13", "(179 << 8) | 14")
+    (source / "init.c").write_text(init)
+
+    bridge = (SOURCE / "lk_bridge.S").read_text()
+    if profile in (NS6536_2509N, NS6541_2965N):
+        for old, new, count in (
+            ("0x41e1be56", "0x41e1bf62", 2),
+            ("0x41e24500", f"0x{profile.thumb_cave:x}", 3),
+            ("=0xbb53", f"=0x{profile.branch_halfword:x}", 1),
+        ):
+            bridge = replace_once(bridge, old, new, count)
+        bridge = replace_once(
+            bridge,
+            "    ldr lr, =0x20e5b9\n    ldr pc, =0x20e199",
+            "    /* Two checked preloader calls converge here. Return to the one that called us. */\n"
+            "    push {r0}\n"
+            "    ldr r0, =0x20e471\n"
+            "    cmp lr, r0\n"
+            "    pop {r0}\n"
+            "    bne stock_atf\n"
+            "    ldr pc, =0x20e079\n"
+            "stock_atf:\n"
+            "    ldr pc, =0x20e0d9",
+        )
+    (source / "lk_bridge.S").write_text(bridge)
+
+    cave = (SOURCE / "handoff_cave.S").read_text()
+    if profile in (NS6536_2509N, NS6541_2965N):
+        cave = replace_once(cave, "0x41e1be56", "0x41e1bf62")
+        cave = replace_once(cave, "0x41e1be5b", "0x41e1bf67", 2)
+    (source / "handoff_cave.S").write_text(cave)
+    (source / "preloader_snapshot.S").write_bytes((SOURCE / "preloader_snapshot.S").read_bytes())
+
+    fdt = (SOURCE / "fdt_initrd.S").read_text()
+    if profile != NS6575_8338N or archive_length != 2038:
+        address = profile.archive_address
+        end = profile.archive_address + archive_length - 0x44000000
+        fdt = replace_once(fdt, "#0x443e", f"#0x{address >> 16:04x}", 2)
+        fdt = replace_once(fdt, "#0xd7eb", f"#0x{address & 0xffff:04x}", 2)
+        fdt = replace_once(fdt, "#2038", f"#{archive_length}", 2)
+        fdt = replace_once(fdt, "0x3edfe1", f"0x{end:x}")
+    if profile != NS6575_8338N or slot == "b":
+        tail = profile.archive_address - 8
+        tail_word = int.from_bytes(bytes.fromhex(profile.ramdisk_tail), "little")
+        fdt = replace_once(
+            fdt,
+            "    movz x20, #0x41e3, lsl #16\n    movk x20, #0x2400",
+            "    /* Refuse a changed boot image before touching its ramdisk. */\n"
+            f"    movz x21, #0x{tail >> 16:04x}, lsl #16\n"
+            f"    movk x21, #0x{tail & 0xffff:04x}\n"
+            "    adr x17, ramdisk_tail\n"
+            "    mov w18, #8\n"
+            "compare_tail_bytes:\n"
+            "    ldrb w16, [x21], #1\n"
+            "    ldrb w19, [x17], #1\n"
+            "    cmp w16, w19\n"
+            "    b.ne forward\n"
+            "    subs w18, w18, #1\n"
+            "    b.ne compare_tail_bytes\n"
+            "    movz x20, #0x41e3, lsl #16\n"
+            "    movk x20, #0x2400",
+        )
+        end = profile.archive_address + archive_length - 0x44000000
+        replacement = f"replacement:\n    .ascii \"initrd=0x44000000,0x{end:x} panic=1 \""
+        fdt = replace_once(
+            fdt, replacement,
+            replacement + "\n    .balign 8\nramdisk_tail:\n"
+            f"    .quad 0x{tail_word:016x}",
+        )
+        # QEMU faults on the old unaligned eight-byte tail load. Compare
+        # bytes so this guard also works with strict early-boot alignment.
+        # Keep the archive at offset 1024 within the fixed LK cave.
+        fdt = replace_once(
+            fdt,
+            "/* Historical 4-byte diagnostic loop is retained for binary identity. "
+            "It is\n * unreachable in this selected release path. */\n"
+            "halt:\n    b halt\n", "")
+        fdt = replace_once(fdt, "    .balign 8\nramdisk_tail:", "ramdisk_tail:")
+        # The final barrier still completes all cache cleans before handoff.
+        fdt = replace_once(fdt, "    bl clean_range\n    dsb sy\n    /* 5.",
+                           "    bl clean_range\n    /* 5.")
+    (source / "fdt_initrd.S").write_text(fdt)
+    return source
+
+
 def build(args: argparse.Namespace) -> None:
     # Read and pin every private input first. This refuses other board or
     # firmware revisions instead of silently applying offsets to them.
-    preloader = checked(args.preloader, "preloader")
-    lk_a = checked(args.lk_a, "lk_a")
-    lk_b = checked(args.lk_b, "lk_b")
-    boot_a = checked(args.boot_a, "boot_a")
+    if args.misc is None:
+        raise ValueError("checked A/B slot record is required to choose the RAM profile")
+    slot = active_slot(args.misc.read_bytes())
+    lk_path = args.lk_a if slot == "a" else args.lk_b
+    boot_path = args.boot_a if slot == "a" else args.boot_b
+    if lk_path is None or boot_path is None:
+        raise ValueError(f"active slot {slot.upper()} needs its LK and boot images")
+    profile = select_profile(args.preloader.read_bytes(), lk_path.read_bytes(),
+                             boot_path.read_bytes())
+    preloader = checked(args.preloader, "preloader", profile.preloader)
+    lk = checked(lk_path, f"lk_{slot}", profile.lk)
+    boot = checked(boot_path, f"boot_{slot}", profile.boot)
     checked(args.stage1, "stage1")
-    if lk_a != lk_b:
-        raise ValueError("LK A and B differ")
-    check_lk(lk_a)
-    stock_ramdisk = boot_ramdisk(boot_a, "boot_a")
+    check_lk(lk, profile)
+    stock_ramdisk = boot_ramdisk(boot, f"boot_{slot}")
     if not stock_ramdisk.startswith(b"\x1f\x8b\x08"):
-        raise ValueError("boot_a: gzip ramdisk missing")
-    if len(stock_ramdisk) != RAMDISK_SIZE or sha(stock_ramdisk) != RAMDISK_HASH:
-        raise ValueError("boot_a ramdisk differs from tested live image")
+        raise ValueError("boot image: gzip ramdisk missing")
+    if (len(stock_ramdisk), sha(stock_ramdisk)) != profile.ramdisk:
+        raise ValueError("boot ramdisk differs from checked image")
     stock_files = cpio_entries(gzip.decompress(stock_ramdisk))
     adbd = stock_files["sbin/adbd"]
-    if len(adbd) != 683932 or sha(adbd) != ADBD_HASH:
-        raise ValueError("recovery adbd differs from checked 8338N binary")
-    for offset, word in ((0x716, "2df05bfe"), (0x720, "2df044fe"),
-                         (0x68e, "22e057f0")):
+    if (len(adbd), sha(adbd)) != profile.adbd:
+        raise ValueError("recovery adbd differs from checked image")
+    for offset, word in profile.adbd_words:
         check_bytes(adbd, "recovery adbd", bytes.fromhex(word), offset)
     if len(stock_files) != 159:
         raise ValueError("unexpected stock initramfs file count")
-    print("FIRMWARE_LAYOUT_OK pinned 8338N LK, boot image and recovery adbd")
+    print(f"FIRMWARE_LAYOUT_OK {profile.name} slot {slot.upper()}")
 
     # Build in a temporary directory. No generated binary enters the public
     # source tree, and the requested output is populated only after all tests.
     payload: dict[str, bytes] = {}
     with tempfile.TemporaryDirectory() as folder:
         temp = Path(folder)
-        elf = build_init(temp, args.clang, args.ld, args.objcopy)
+        source = variant_sources(temp, profile, slot, 2038)
+        elf = build_init(temp, args.clang, args.ld, args.objcopy, source)
         check_init_elf(elf)
         print(f"BUILD_LAYOUT_OK init.elf bytes={len(elf)} sha256={sha(elf)}")
         archive = gzip.compress(
@@ -306,7 +423,7 @@ def build(args: argparse.Namespace) -> None:
             newc_entry("sbin/multi_init", b"../init", 0o120777, 272) +
             newc_entry("TRAILER!!!", b"", 0, 273), compresslevel=9, mtime=0)
         # zlib versions disagree about the GZIP OS byte. Use the portable
-        # value so the payload is identical on supported Python builds.
+        # value so this header is stable across supported Python builds.
         if archive[:3] != b"\x1f\x8b\x08" or archive[4:8] != b"\x00" * 4:
             raise RuntimeError("unexpected GZIP header")
         archive = archive[:9] + b"\xff" + archive[10:]
@@ -320,34 +437,41 @@ def build(args: argparse.Namespace) -> None:
         if after != {**stock_files, "init": elf, "sbin/multi_init": b"../init"}:
             raise ValueError("overlay changes another stock initramfs member")
         (temp / "initramfs_overlay.cpio.gz").write_bytes(archive)
-        source = variant_fdt_sources(temp, len(archive))
+        source = variant_sources(temp, profile, slot, len(archive))
         for name, target, address in (
             ("preloader_snapshot", "armv7a-none-eabi", 0x227000),
             ("lk_bridge", "armv7a-none-eabi", 0x226000),
-            ("handoff_cave", "armv7a-none-eabi", 0x41E24500),
+            ("handoff_cave", "armv7a-none-eabi", profile.thumb_cave),
+            ("fdt_initrd", "aarch64-none-elf", 0x41E32000),
         ):
             binary_name = name + ".bin"
-            payload[binary_name] = check_output(
-                build_assembly(temp, name, target, address,
-                               args.clang, args.ld, args.objcopy), binary_name)
-        fdt = build_assembly(temp, "fdt_initrd", "aarch64-none-elf", 0x41E32000,
-                             args.clang, args.ld, args.objcopy, source)
-        payload["fdt_initrd.bin"] = fdt
-        print(f"BUILD_LAYOUT_OK fdt_initrd.bin bytes={len(fdt)} sha256={sha(fdt)}")
-    payload["preloader_patched.bin"] = patch_preloader(preloader)
-    check_layout(payload)
-    print("OFFLINE_BOOTSTRAP_PREFLIGHT_OK: pinned artifacts match and the host-built bootstrap fits its fixed bounds")
+            binary = build_assembly(temp, name, target, address,
+                                    args.clang, args.ld, args.objcopy, source)
+            if name == "fdt_initrd":
+                payload[binary_name] = binary
+                print(f"BUILD_LAYOUT_OK {binary_name} bytes={len(binary)} sha256={sha(binary)}")
+            else:
+                payload[binary_name] = check_output(binary, binary_name, profile, slot)
+    payload["preloader_patched.bin"] = patch_preloader(preloader, profile, slot)
+    check_layout(payload, profile, slot)
+    print(f"OFFLINE_BOOTSTRAP_PREFLIGHT_OK: checked {profile.name} slot {slot.upper()} RAM image")
     args.out.mkdir(parents=True, exist_ok=True)
     for name, data in payload.items():
         (args.out / name).write_bytes(data)
+    (args.out / "firmware-profile.txt").write_text(f"{profile.name} {slot}\n")
     print(f"OUTPUT_DIR {args.out.resolve()}")
     print("OFFLINE_ONLY: no USB access or live eMMC operation was performed")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    for flag in ("preloader", "lk-a", "lk-b", "boot-a", "stage1"):
+    for flag in ("preloader", "stage1"):
         parser.add_argument("--" + flag, type=Path, required=True)
+    parser.add_argument("--lk-a", type=Path)
+    parser.add_argument("--lk-b", type=Path)
+    parser.add_argument("--boot-a", type=Path)
+    parser.add_argument("--boot-b", type=Path)
+    parser.add_argument("--misc", type=Path)
     parser.add_argument("--out", type=Path, default=SOURCE / "build")
     parser.add_argument("--clang", default=shutil.which("clang") or "clang")
     parser.add_argument("--ld", default=shutil.which("ld.lld") or "ld.lld")

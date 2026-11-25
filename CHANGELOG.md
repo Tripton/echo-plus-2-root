@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-11-11
+
+- Refactored the boot and kernel stages for multiple firmware builds and either A or B slot. Added offline-checked profiles for `NS6536/2509N`, `NS6541/2965N` and `NS65741/8149N`. Device tests are still pending.
+- Added `diagnose` to collect early boot images from unsupported firmware for manual offset analysis.
+
 ## 2026-11-10
 
 - Use Kamakiri2 for Linux `dump` and `boot` because Linux rejected the older Kamakiri USB request.

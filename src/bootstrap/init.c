@@ -2,7 +2,7 @@
  *
  * The kernel extracts this second CPIO archive after the stock initramfs. The
  * new /init runs before Android and exposes an ADB and serial recovery window.
- * It mounts the checked system_a image read-only with noload; this code does
+ * It mounts the selected system image read-only with noload; this code does
  * not issue an eMMC program or erase operation. The host later loads the stock
  * policy in RAM and hands control back to stock init.
  */
@@ -73,8 +73,8 @@ static int make_chr(const char *path, s64 major, s64 minor) {
 static void patch_ram_adbd(void) {
     s64 fd = open_file("/sbin/adbd", O_RDWR);
     if (fd < 0) fatal();
-    /* These three offsets belong only to the pinned 8338N ramdisk adbd.
-     * The offline builder checks the full file hash and all original words.
+    /* This base source uses the 8338N ramdisk adbd words. The offline builder
+     * generates other exact-image variants after checking their full hashes.
      * The final site skips the PR_CAPBSET_DROP loop. */
     const s64 offsets[3] = {0x716, 0x720, 0x68e};
     const unsigned int expected[3] = {0xfe5bf02d, 0xfe44f02d, 0xf057e022};
