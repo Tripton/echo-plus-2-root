@@ -38,6 +38,7 @@ OUTPUTS = {
     "preloader_patched.bin": (145716, "1fd3baa00bb9a951ca3f7e5ef3a6ec4ac6d4c46696c190840814d0c04a1561c1"),
 }
 PRELOADER_BASE = 0x201000
+INIT_MAPPED_SHA256 = "7786ff0ff5cbd387b74e309a8599cab09edd71ebd57de4a947e0cd8508104deb"
 LK_BASE = 0x41E00000
 ARCHIVE_ADDRESS = 0x443ED7EB
 BOOT_IMAGE_ENTRY = 0x40080000
@@ -179,6 +180,8 @@ def check_init_elf(data: bytes) -> None:
             not 0 < file_size <= 0x2000 or memory_size != file_size or
             alignment != 0x1000 or offset + file_size != len(data)):
         raise ValueError("bootstrap init load segment changed or exceeds its bound")
+    if sha(data[offset:offset + file_size]) != INIT_MAPPED_SHA256:
+        raise ValueError("bootstrap init executable bytes differ from the tested image")
 
 
 def patch_preloader(source: bytes) -> bytes:

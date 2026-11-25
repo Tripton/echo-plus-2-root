@@ -18,7 +18,7 @@ Connect these contacts to your computer with USB data. Keep the Echo's power sup
 
 ## Prepare the computer
 
-I tested the full host workflow on macOS, and the `dump` and `boot` USB stages on Arch Linux ARM in a UTM VM. MTKClient implements Kamakiri and Kamakiri2 as separate BootROM exploit paths. The older Kamakiri USB request failed under Linux usbfs in my tests. Kamakiri2 uses different USB transfers and loaded the same Stage 1 payload. A native Linux x86-64 end-to-end run with the official LLVM 23.1.3 release build has since completed every stage: `dump`, `boot`, `persist`, `verify`, and `configure`.
+I tested the full host workflow on macOS, and the `dump` and `boot` USB stages on Arch Linux ARM in a UTM VM. MTKClient implements Kamakiri and Kamakiri2 as separate BootROM exploit paths. The older Kamakiri USB request failed under Linux usbfs in my tests. Kamakiri2 uses different USB transfers and loaded the same Stage 1 payload. A contributor completed a native Linux x86-64 run with the official LLVM 23.1.3 release build through `dump`, `boot`, `persist`, `verify`, and `configure`.
 
 Install Python 3.11 or newer to run this guide, [uv](https://docs.astral.sh/uv/getting-started/installation/), Git, JDK (`javac` and `keytool`), `zip`, Android SDK Platform 36, Build Tools 36.0.0, NDK 28.2.13676358, Platform Tools, and LLVM Clang/LLD/llvm-objcopy **23.1.3**. Set `ANDROID_SDK_ROOT` if the SDK is outside its usual location.
 
@@ -51,7 +51,7 @@ On Linux, install udev permission rules before the first `dump`. The first rule 
 
 ```sh
 sudo cp local/tools/mtkclient/Setup/Linux/52-mtk.rules /etc/udev/rules.d/
-echo 'SUBSYSTEM=="tty", ATTRS{idVendor}=="0e8d", MODE="0666", ENV{ID_MM_DEVICE_IGNORE}="1"' \
+echo 'SUBSYSTEM=="tty", ATTRS{idVendor}=="0e8d", ATTRS{idProduct}=="2007", MODE="0660", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"' \
   | sudo tee /etc/udev/rules.d/53-mtk-tty.rules
 sudo udevadm control --reload-rules
 sudo udevadm trigger
